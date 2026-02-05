@@ -8,3 +8,4 @@ from .plot import (
     plot_rolling_correlation,
     plot_scatter_correlation,
 )
+from .ui import BacktestUI
