@@ -1,4 +1,5 @@
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -58,20 +59,20 @@ def print_comparison(results: dict[str, dict]) -> None:
         print(row)
 
 
-def save_plots(results: dict[str, dict], timestamp: str) -> None:
-    """Generate and save all plots."""
+def save_plots(results: dict[str, dict], results_dir: Path) -> None:
+    """Generate and save all plots to results subfolder."""
     names = list(results.keys())
 
     # Backtest plot for first strategy
     first_name = names[0]
     fig1 = plot_backtest(results[first_name], title=first_name)
-    fig1.savefig(RESULTS_DIR / f"backtest_{timestamp}.png", dpi=150)
-    print(f"\nSaved: results/backtest_{timestamp}.png")
+    fig1.savefig(results_dir / "backtest.png", dpi=150)
+    print(f"\nSaved: {results_dir.relative_to(RESULTS_DIR)}/backtest.png")
 
     # Comparison plot (all strategies)
     fig2 = plot_comparison(results, title="Strategy Comparison")
-    fig2.savefig(RESULTS_DIR / f"comparison_{timestamp}.png", dpi=150)
-    print(f"Saved: results/comparison_{timestamp}.png")
+    fig2.savefig(results_dir / "comparison.png", dpi=150)
+    print(f"Saved: {results_dir.relative_to(RESULTS_DIR)}/comparison.png")
 
     # Scatter correlation (first vs last strategy)
     if len(names) >= 2:
@@ -84,8 +85,8 @@ def save_plots(results: dict[str, dict], timestamp: str) -> None:
             title=f"{names[0]} vs {names[-1]}",
             use_roc=True,
         )
-        fig3.savefig(RESULTS_DIR / f"correlation_{timestamp}.png", dpi=150)
-        print(f"Saved: results/correlation_{timestamp}.png")
+        fig3.savefig(results_dir / "correlation.png", dpi=150)
+        print(f"Saved: {results_dir.relative_to(RESULTS_DIR)}/correlation.png")
 
     # Return distribution
     fig4 = plot_return_distribution(
@@ -94,15 +95,15 @@ def save_plots(results: dict[str, dict], timestamp: str) -> None:
         use_roc=True,
         title="10-Day Return Distribution",
     )
-    fig4.savefig(RESULTS_DIR / f"distribution_{timestamp}.png", dpi=150)
-    print(f"Saved: results/distribution_{timestamp}.png")
+    fig4.savefig(results_dir / "distribution.png", dpi=150)
+    print(f"Saved: {results_dir.relative_to(RESULTS_DIR)}/distribution.png")
 
 
-def save_metrics(results: dict[str, dict], timestamp: str) -> None:
-    """Save metrics to CSV."""
+def save_metrics(results: dict[str, dict], results_dir: Path) -> None:
+    """Save metrics to CSV in results subfolder."""
     metrics_df = pd.DataFrame({name: r["metrics"] for name, r in results.items()}).T
-    metrics_df.to_csv(RESULTS_DIR / f"metrics_{timestamp}.csv")
-    print(f"Saved: results/metrics_{timestamp}.csv")
+    metrics_df.to_csv(results_dir / "metrics.csv")
+    print(f"Saved: {results_dir.relative_to(RESULTS_DIR)}/metrics.csv")
 
 
 def run_optimization(prices: pd.DataFrame) -> dict[str, Any]:
@@ -143,6 +144,10 @@ def main() -> None:
     """Main entry point."""
     RESULTS_DIR.mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create timestamped subfolder for this simulation
+    sim_dir = RESULTS_DIR / timestamp
+    sim_dir.mkdir(exist_ok=True)
 
     prices = load_prices()
 
@@ -157,8 +162,9 @@ def main() -> None:
     }
 
     print_comparison(results)
-    save_plots(results, timestamp)
-    save_metrics(results, timestamp)
+    save_plots(results, sim_dir)
+    save_metrics(results, sim_dir)
+    print(f"\nAll results saved to: results/{timestamp}/")
     plt.show()
 
 
