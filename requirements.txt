@@ -1,0 +1,18 @@
+# Core
+pandas
+numpy
+pyarrow
+scipy
+requests
+
+# Technical analysis
+pandas_ta
+
+# Backtesting
+backtesting
+
+# Jupyter
+ipykernel
+
+# Plotting
+matplotlib
