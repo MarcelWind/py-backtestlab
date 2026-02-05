@@ -39,6 +39,37 @@ class Strategy(ABC):
         pass
 
 
+class BuyAndHoldStrategy(Strategy):
+    """
+    Static buy-and-hold benchmark strategy.
+
+    Holds a fixed weight distribution that never changes.
+    Useful as a baseline to compare active strategies against.
+    """
+
+    lookback = 0
+
+    def __init__(self, weights: np.ndarray | list[float] | None = None):
+        """
+        Args:
+            weights: Fixed weight vector. If None, will equal-weight all assets.
+        """
+        self._weights = np.array(weights) if weights is not None else None
+
+    def generate_weights(
+        self,
+        prices: pd.DataFrame,
+        returns: pd.DataFrame,
+        index: int,
+    ) -> np.ndarray:
+        """Return the fixed weight vector."""
+        if self._weights is not None:
+            return self._weights
+        # Default: equal weight across all assets
+        n_assets = len(prices.columns)
+        return np.ones(n_assets) / n_assets
+
+
 @dataclass
 class StrategySpec:
     """Specification for a strategy with its parameter space."""

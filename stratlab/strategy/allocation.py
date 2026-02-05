@@ -1,5 +1,7 @@
 """Portfolio allocation methods."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
@@ -26,8 +28,15 @@ def optimize_sharpe_weights(
     if n_assets == 0 or len(returns) < 2:
         return np.array([])
 
-    mean_returns = returns.mean().values.copy()
-    cov_matrix = returns.cov().values.copy()
+    # Suppress warnings from covariance calculation with constant columns
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        mean_returns = returns.mean().values.copy()
+        cov_matrix = returns.cov().values.copy()
+
+    # Replace NaN values (from zero-variance columns) with 0
+    mean_returns = np.nan_to_num(mean_returns, nan=0.0)
+    cov_matrix = np.nan_to_num(cov_matrix, nan=0.0)
 
     # Handle near-singular covariance (add small regularization)
     cov_matrix += np.eye(n_assets) * 1e-8
