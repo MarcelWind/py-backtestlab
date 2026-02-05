@@ -11,7 +11,7 @@ from matplotlib.figure import Figure
 def plot_backtest(
     results: dict,
     title: str = "Portfolio Backtest",
-    figsize: tuple = (14, 10),
+    figsize: tuple[float, float] = (14, 10),
 ) -> Figure:
     """
     Plot portfolio equity curve and position sizes.
@@ -119,7 +119,7 @@ def plot_backtest(
 def plot_comparison(
     results_dict: dict[str, dict],
     title: str = "Strategy Comparison",
-    figsize: tuple = (14, 6),
+    figsize: tuple[float, float] = (14, 6),
 ) -> Figure:
     """
     Plot multiple equity curves for comparison.
@@ -157,7 +157,7 @@ def plot_rolling_correlation(
     window: int = 30,
     use_roc: bool = False,
     title: str = "Rolling Window Correlation",
-    figsize: tuple = (14, 6),
+    figsize: tuple[float, float] = (14, 6),
     label_a: str = "Strategy",
     label_b: str = "Benchmark",
 ) -> Figure:
@@ -287,7 +287,7 @@ def plot_return_distribution(
     window: int = 30,
     use_roc: bool = True,
     title: str = "Return Distribution",
-    figsize: tuple = (14, 8),
+    figsize: tuple[float, float] = (14, 8),
 ) -> Figure:
     """
     Plot return distributions for multiple strategies.
@@ -325,7 +325,8 @@ def plot_return_distribution(
             start_idx = i * window
             end_idx = start_idx + window
             # Compound returns over window
-            window_ret = (1 + returns.iloc[start_idx:end_idx]).prod() - 1
+            window_vals = (1 + returns.iloc[start_idx:end_idx]).to_numpy()
+            window_ret = float(np.prod(window_vals)) - 1.0
             windowed.append(window_ret)
 
         window_returns[name] = np.array(windowed)
@@ -355,7 +356,8 @@ def plot_return_distribution(
 
     # Width for each strategy's bar (with gap)
     bar_width = bin_width / (n_strategies + 1)
-    colors = plt.cm.tab10.colors
+    cmap = plt.colormaps["tab10"]
+    colors = [cmap(i) for i in range(n_strategies)]
 
     for i, (name, rets) in enumerate(window_returns.items()):
         # Compute histogram counts
@@ -385,9 +387,8 @@ def plot_return_distribution(
     labels = list(results_dict.keys())
     bp = ax2.boxplot(data, labels=labels, patch_artist=True)
 
-    colors = plt.cm.tab10.colors
-    for patch, color in zip(bp["boxes"], colors):
-        patch.set_facecolor(color)
+    for i, patch in enumerate(bp["boxes"]):
+        patch.set_facecolor(colors[i])
         patch.set_alpha(0.6)
 
     ax2.axhline(y=0, color="black", linestyle="--", linewidth=1)
@@ -424,7 +425,7 @@ def plot_scatter_correlation(
     window: int = 1,
     use_roc: bool = False,
     title: str = "Return Correlation",
-    figsize: tuple = (10, 8),
+    figsize: tuple[float, float] = (10, 8),
     label_a: str = "Strategy A",
     label_b: str = "Strategy B",
 ) -> Figure:
@@ -463,13 +464,15 @@ def plot_scatter_correlation(
         for i in range(n_windows):
             start_idx = i * window
             end_idx = start_idx + window
-            windowed_a.append((1 + aligned[label_a].iloc[start_idx:end_idx]).prod() - 1)
-            windowed_b.append((1 + aligned[label_b].iloc[start_idx:end_idx]).prod() - 1)
-        x = np.array(windowed_a)
-        y = np.array(windowed_b)
+            vals_a = (1 + aligned[label_a].iloc[start_idx:end_idx]).to_numpy()
+            vals_b = (1 + aligned[label_b].iloc[start_idx:end_idx]).to_numpy()
+            windowed_a.append(float(np.prod(vals_a)) - 1.0)
+            windowed_b.append(float(np.prod(vals_b)) - 1.0)
+        x: np.ndarray = np.array(windowed_a, dtype=np.float64)
+        y: np.ndarray = np.array(windowed_b, dtype=np.float64)
     else:
-        x = aligned[label_a].values
-        y = aligned[label_b].values
+        x = np.asarray(aligned[label_a], dtype=np.float64)
+        y = np.asarray(aligned[label_b], dtype=np.float64)
 
     # Compute correlation and regression
     with warnings.catch_warnings():
@@ -488,7 +491,8 @@ def plot_scatter_correlation(
     ax.scatter(x, y, alpha=0.5, s=20, edgecolor="none")
 
     # Trendline
-    x_line = np.array([x.min(), x.max()])
+    x_min, x_max = float(np.min(x)), float(np.max(x))
+    x_line = np.array([x_min, x_max])
     y_line = slope * x_line + intercept
     ax.plot(x_line, y_line, color="red", linewidth=2, label=f"Trend: y = {slope:.2f}x + {intercept:.4f}")
 
@@ -497,8 +501,8 @@ def plot_scatter_correlation(
     ax.axvline(x=0, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
 
     # 45-degree line (perfect correlation)
-    lim_min = min(x.min(), y.min())
-    lim_max = max(x.max(), y.max())
+    lim_min = min(x_min, float(np.min(y)))
+    lim_max = max(x_max, float(np.max(y)))
     ax.plot([lim_min, lim_max], [lim_min, lim_max], color="green", linestyle=":", linewidth=1, alpha=0.7, label="y = x")
 
     # Labels
