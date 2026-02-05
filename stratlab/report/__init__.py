@@ -6,4 +6,5 @@ from .plot import (
     plot_comparison,
     plot_return_distribution,
     plot_rolling_correlation,
+    plot_scatter_correlation,
 )

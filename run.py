@@ -8,7 +8,7 @@ from stratlab.data import load_ohlcv
 from stratlab.universe.selector import UNIVERSE
 from stratlab.strategy import MomentumStrategy, SharpeStrategy, BuyAndHoldStrategy
 from stratlab.backtest.backtester import Backtester, PortfolioBacktest
-from stratlab.report.plot import plot_backtest, plot_comparison, plot_rolling_correlation, plot_return_distribution
+from stratlab.report.plot import *
 
 # Ensure results directory exists
 RESULTS_DIR.mkdir(exist_ok=True)
@@ -62,14 +62,15 @@ fig2 = plot_comparison(
 fig2.savefig(RESULTS_DIR / f"comparison_{timestamp}.png", dpi=150)
 print(f"Saved: results/comparison_{timestamp}.png")
 
-# --- Rolling Correlation: Momentum vs Buy&Hold ---
-fig3 = plot_rolling_correlation(
-    returns_a=mom_results["returns"],
-    returns_b=buyhold_results["returns"],
+# --- Scatter Correlation: Momentum vs Buy&Hold ---
+fig3 = plot_scatter_correlation(
+    results_a=mom_results,
+    results_b=buyhold_results,
     window=30,
     label_a="Momentum",
     label_b="Buy & Hold",
-    title="Momentum vs Buy & Hold Correlation",
+    title="Momentum vs Buy & Hold",
+    use_roc=True,
 )
 fig3.savefig(RESULTS_DIR / f"correlation_{timestamp}.png", dpi=150)
 print(f"Saved: results/correlation_{timestamp}.png")

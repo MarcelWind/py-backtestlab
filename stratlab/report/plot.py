@@ -152,24 +152,26 @@ def plot_comparison(
 
 
 def plot_rolling_correlation(
-    returns_a: pd.Series,
-    returns_b: pd.Series,
+    results_a: dict,
+    results_b: dict,
     window: int = 30,
+    use_roc: bool = False,
     title: str = "Rolling Window Correlation",
     figsize: tuple = (14, 6),
     label_a: str = "Strategy",
     label_b: str = "Benchmark",
 ) -> Figure:
     """
-    Plot correlation between two return series over non-overlapping windows.
+    Plot correlation between two strategies over non-overlapping windows.
 
     Computes correlation for each window of length n, showing how the
     relationship between strategies changes over time.
 
     Args:
-        returns_a: First return series (e.g., active strategy)
-        returns_b: Second return series (e.g., buy-and-hold benchmark)
+        results_a: Results dict for first strategy
+        results_b: Results dict for second strategy
         window: Window size in periods (e.g., 30 days)
+        use_roc: If True, use return-on-capital (strip out cash)
         title: Plot title
         figsize: Figure size
         label_a: Label for first series
@@ -178,6 +180,14 @@ def plot_rolling_correlation(
     Returns:
         Matplotlib Figure
     """
+    returns_a = results_a["returns"]
+    returns_b = results_b["returns"]
+
+    # Apply ROC if requested
+    if use_roc:
+        returns_a = compute_return_on_capital(returns_a, results_a["weights"])
+        returns_b = compute_return_on_capital(returns_b, results_b["weights"])
+
     # Align the two series
     aligned = pd.concat([returns_a, returns_b], axis=1, keys=[label_a, label_b]).dropna()
 
@@ -405,4 +415,116 @@ def plot_return_distribution(
 
     plt.tight_layout()
     plt.subplots_adjust(bottom=0.18)
+    return fig
+
+
+def plot_scatter_correlation(
+    results_a: dict,
+    results_b: dict,
+    window: int = 1,
+    use_roc: bool = False,
+    title: str = "Return Correlation",
+    figsize: tuple = (10, 8),
+    label_a: str = "Strategy A",
+    label_b: str = "Strategy B",
+) -> Figure:
+    """
+    Scatter plot of returns between two strategies with trendline.
+
+    Args:
+        results_a: Results dict for first strategy
+        results_b: Results dict for second strategy
+        window: Window size for aggregating returns (1 = daily)
+        use_roc: If True, use return-on-capital (strip out cash)
+        title: Plot title
+        figsize: Figure size
+        label_a: Label for x-axis strategy
+        label_b: Label for y-axis strategy
+
+    Returns:
+        Matplotlib Figure
+    """
+    returns_a = results_a["returns"]
+    returns_b = results_b["returns"]
+
+    # Apply ROC if requested
+    if use_roc:
+        returns_a = compute_return_on_capital(returns_a, results_a["weights"])
+        returns_b = compute_return_on_capital(returns_b, results_b["weights"])
+
+    # Align series
+    aligned = pd.concat([returns_a, returns_b], axis=1, keys=[label_a, label_b]).dropna()
+
+    # Aggregate into windows if window > 1
+    if window > 1:
+        n_windows = len(aligned) // window
+        windowed_a = []
+        windowed_b = []
+        for i in range(n_windows):
+            start_idx = i * window
+            end_idx = start_idx + window
+            windowed_a.append((1 + aligned[label_a].iloc[start_idx:end_idx]).prod() - 1)
+            windowed_b.append((1 + aligned[label_b].iloc[start_idx:end_idx]).prod() - 1)
+        x = np.array(windowed_a)
+        y = np.array(windowed_b)
+    else:
+        x = aligned[label_a].values
+        y = aligned[label_b].values
+
+    # Compute correlation and regression
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        correlation = np.corrcoef(x, y)[0, 1]
+    if np.isnan(correlation):
+        correlation = 0.0
+
+    # Linear regression (y = mx + b)
+    slope, intercept = np.polyfit(x, y, 1)
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Scatter plot
+    ax.scatter(x, y, alpha=0.5, s=20, edgecolor="none")
+
+    # Trendline
+    x_line = np.array([x.min(), x.max()])
+    y_line = slope * x_line + intercept
+    ax.plot(x_line, y_line, color="red", linewidth=2, label=f"Trend: y = {slope:.2f}x + {intercept:.4f}")
+
+    # Reference lines
+    ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
+    ax.axvline(x=0, color="gray", linestyle="--", linewidth=0.8, alpha=0.5)
+
+    # 45-degree line (perfect correlation)
+    lim_min = min(x.min(), y.min())
+    lim_max = max(x.max(), y.max())
+    ax.plot([lim_min, lim_max], [lim_min, lim_max], color="green", linestyle=":", linewidth=1, alpha=0.7, label="y = x")
+
+    # Labels
+    period_label = f"{window}-Day" if window > 1 else "Daily"
+    ax.set_xlabel(f"{label_a} {period_label} Return", fontsize=11)
+    ax.set_ylabel(f"{label_b} {period_label} Return", fontsize=11)
+    ax.set_title(f"{title} (r = {correlation:.3f})", fontsize=14, fontweight="bold")
+    ax.legend(loc="upper left")
+    ax.grid(True, alpha=0.3)
+
+    # Stats box
+    stats_text = (
+        f"Correlation: {correlation:.3f}\n"
+        f"Slope (β): {slope:.3f}\n"
+        f"Intercept (α): {intercept:.4f}\n"
+        f"N: {len(x)} observations"
+    )
+    ax.text(
+        0.98, 0.02, stats_text,
+        transform=ax.transAxes,
+        verticalalignment="bottom",
+        horizontalalignment="right",
+        fontsize=10,
+        fontfamily="monospace",
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.9),
+    )
+
+    plt.tight_layout()
     return fig
