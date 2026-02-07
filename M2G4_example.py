@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 from stratlab.data.fred import compute_global_m2
 
 # Fetch G4 global M2 (US + EU + JP + CN, FX-adjusted)
-gm2 = compute_global_m2("2010-01-01")
+gm2 = compute_global_m2("1999-01-01")
 
 # --- Plot ---
 fig, axes = plt.subplots(4, 1, figsize=(14, 16))
