@@ -16,3 +16,6 @@ ipykernel
 
 # Plotting
 matplotlib
+
+# Macro data
+fredapi
