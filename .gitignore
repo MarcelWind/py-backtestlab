@@ -224,6 +224,7 @@ polymarket_data/
 # Market Data
 data/
 *.parquet
+*.zip
 
 # explitly add stratlab/data source files
 !stratlab/data/
