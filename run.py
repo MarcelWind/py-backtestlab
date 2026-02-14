@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 from stratlab.config import RESULTS_DIR
 from stratlab.data import load_ohlcv
 from stratlab.universe.selector import UNIVERSE
-from stratlab.strategy import MomentumStrategy, SharpeStrategy, BuyAndHoldStrategy
 from stratlab.backtest.backtester import Backtester
 from stratlab.optimize import optimize
 from stratlab.report.plot import (
@@ -18,6 +17,8 @@ from stratlab.report.plot import (
     plot_return_distribution,
 )
 
+
+from strategies.weather_market_imbalance import WeatherMarketImbalanceStrategy
 from fetch_data import load_zip
 
 def load_prices(event_slug: str = "", market: str = "") -> pd.DataFrame:
@@ -29,11 +30,22 @@ def load_prices(event_slug: str = "", market: str = "") -> pd.DataFrame:
         df = df[df["market"] == market]
     return df
 
+def run_backtest(strategy: Any, prices: pd.DataFrame) -> pd.DataFrame:
+    """Run a backtest for the given strategy and price data."""
+    backtester = Backtester(strategy=strategy, rebalance_freq=1)
+    results = backtester.run(prices)
+    return pd.DataFrame(results["portfolio_returns"], index=prices.index[1:])
+
 
 def main():
-    df = load_prices('highest-temperature-in-ankara-on-february-10-2026', '1-c-or-below')
+    prices = load_prices('highest-temperature-in-ankara-on-february-10-2026', '1-c-or-below')
     print("Loaded price data:")
-    print(df.head())
+    print(prices.head())
+
+    strategy = WeatherMarketImbalanceStrategy(lookback=1)
+    backtest_results = run_backtest(strategy, prices)
+    print("Backtest results:")
+    print(backtest_results.head())
 
 if __name__ == "__main__":
     main()

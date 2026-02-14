@@ -5,9 +5,6 @@ pyarrow
 scipy
 requests
 
-# Technical analysis
-pandas_ta
-
 # Jupyter
 ipykernel
 
