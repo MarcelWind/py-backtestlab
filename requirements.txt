@@ -8,9 +8,6 @@ requests
 # Technical analysis
 pandas_ta
 
-# Backtesting
-backtesting
-
 # Jupyter
 ipykernel
 
