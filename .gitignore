@@ -228,3 +228,6 @@ data/
 
 # explitly add stratlab/data source files
 !stratlab/data/
+
+# Apple filesystem
+.DS_Store
