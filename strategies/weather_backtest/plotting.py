@@ -3,6 +3,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import matplotlib.dates as mdates
 from matplotlib.lines import Line2D
 
 from market_regime_analysis import (
@@ -48,6 +49,8 @@ def plot_entries_exits(
     out_path: Path,
     vwap: pd.DataFrame | None = None,
     volume: pd.DataFrame | None = None,
+    buy_volume: pd.DataFrame | None = None,
+    sell_volume: pd.DataFrame | None = None,
     vwap_slope_mode: str = "raw",
     vwap_slope_value_per_point: float = 1.0,
     vwap_slope_scale: float = 1.0,
@@ -300,18 +303,95 @@ def plot_entries_exits(
                 ax_profile.spines[side].set_visible(False)
             ax_profile.spines["right"].set_alpha(0.25)
 
-        # Simple volume timeline below the price panel
+        # Simple volume timeline: render as bars on a twin y-axis of the
+        # top price panel so price and volume share the same x-axis.
         if vol_for_profile is not None and len(vol_for_profile):
-            ax_vol.plot(vol_for_profile.index, vol_for_profile.values, color="#6C6C6C", linewidth=0.8)
-            ax_vol.fill_between(vol_for_profile.index, 0, vol_for_profile.values, color="#B6B6B6", alpha=0.25)
-            ax_vol.set_ylabel("vol", fontsize=7)
-            ax_vol.tick_params(axis="x", rotation=45, labelsize=7)
-            ax_vol.tick_params(axis="y", labelsize=7)
-            ax_vol.grid(alpha=0.18)
-            ax_vol.set_xlim(ax.get_xlim())
+            # Create twin axis for volume bars
+            ax_vol_twin = ax.twinx()
+            # Estimate bar width in matplotlib date units (days)
+            try:
+                idx = pd.DatetimeIndex(vol_for_profile.index)
+                if len(idx) >= 2:
+                    median_delta = (idx.to_series().diff().median()).to_timedelta64()
+                    # convert numpy timedelta64 to pandas Timedelta via astype('timedelta64[ns]') path
+                    median_td = pd.Timedelta(median_delta)
+                    bar_width_days = float(median_td / pd.Timedelta(days=1))
+                else:
+                    bar_width_days = 15.0 / 1440.0
+            except Exception:
+                bar_width_days = 15.0 / 1440.0
+
+            ax_vol_twin.bar(vol_for_profile.index, vol_for_profile.values, width=bar_width_days, color="#8B0000", alpha=0.35, align="center", edgecolor="none")
+            ax_vol_twin.set_ylabel("vol", fontsize=7)
+            ax_vol_twin.set_ylim(0, float(np.nanmax(vol_for_profile.values)) * 1.1 if len(vol_for_profile) else 1.0)
+            ax_vol_twin.tick_params(axis="y", labelsize=7)
+            # Anchored cumulative average of volume (anchored at the start of the plotted series)
+            try:
+                vol_for_avg = vol_for_profile.reindex(series.index)
+                # Compute expanding median only on actual updates (vol > 0)
+                valid_updates = vol_for_avg.fillna(0.0) > 0.0
+                if int(valid_updates.sum()) >= 1:
+                    updates = vol_for_avg[valid_updates]
+                    # Use expanding mean over non-zero updates (anchored)
+                    cum_mean_updates = updates.expanding(min_periods=1).mean()
+                    # Align back to full index and carry forward for display
+                    cum_mean_display = cum_mean_updates.reindex(series.index).ffill()
+                    # If there are leading NaNs (before first update), backfill
+                    # with the first computed mean so the anchored line is visible
+                    if cum_mean_display.isna().any():
+                        try:
+                            first_val = float(cum_mean_updates.iloc[0])
+                        except Exception:
+                            first_val = np.nan
+                        if np.isfinite(first_val):
+                            cum_mean_display = cum_mean_display.fillna(first_val)
+
+                    # Only plot if we have at least one finite value
+                    finite_vals = cum_mean_display.to_numpy(dtype=float)
+                    if np.isfinite(finite_vals).any():
+                        ax_vol_twin.plot(
+                            cum_mean_display.index,
+                            cum_mean_display.values,
+                            color="#00008B",
+                            linewidth=0.7,
+                            alpha=0.75,
+                            linestyle="--",
+                            zorder=12,
+                        )
+            except Exception:
+                pass
+            # keep x ticks on the main axis only (do not remove ticks on the
+            # underlying `ax_vol`, which should display the time axis)
+
+            # Plot per-market instant delta (buy minus sell volume)
+            # whenever `buy_volume` and `sell_volume` matrices are available.
+            plotted = False
+            if buy_volume is not None and sell_volume is not None and market in buy_volume.columns and market in sell_volume.columns:
+                buy_ser = buy_volume[market].reindex(series.index).fillna(0.0)
+                sell_ser = sell_volume[market].reindex(series.index).fillna(0.0)
+                delta_inst = buy_ser - sell_ser
+                # Determine bar width (days) if previously computed, else default
+                try:
+                    bw = locals().get('bar_width_days', 15.0 / 1440.0)
+                except Exception:
+                    bw = 15.0 / 1440.0
+                ax_vol.bar(delta_inst.index, delta_inst.values, width=bw, color="#000000", alpha=0.9, align="center", edgecolor="none")
+                ax_vol.set_ylabel("inst buy-sell vol", fontsize=7)
+                ax_vol.tick_params(axis="x", rotation=45, labelsize=7)
+                ax_vol.tick_params(axis="y", labelsize=7)
+                ax_vol.grid(alpha=0.18)
+                # soft zero line for quick visual reference
+                ax_vol.axhline(0.0, color="#888888", linestyle="-", linewidth=0.8, alpha=0.6, zorder=1)
+                # show time-formatted x-axis on the delta subplot
+                ax_vol.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m %H:%M'))
+                ax_vol.set_xlim(ax.get_xlim())
+                plotted = True
+
+            if not plotted:
+                # No per-market buy/sell data; hide the subplot to keep layout compact.
+                ax_vol.set_visible(False)
         else:
-            ax_vol.text(0.5, 0.5, "No volume data", ha="center", va="center", fontsize=8)
-            ax_vol.set_axis_off()
+            ax_vol.set_visible(False)
 
         # Volume imbalance percent panel
         if vwap is not None and market in vwap.columns and vol_for_profile is not None:
@@ -334,6 +414,7 @@ def plot_entries_exits(
                 entry_times = pd.to_datetime(market_trades["entry_time"])
                 ratio_at_entry = ratio_pct.reindex(entry_times).to_numpy(dtype=float)
                 ax_vol_ratio.scatter(entry_times, ratio_at_entry, marker="v", s=22, color="#8B0000", zorder=6)
+            ax_vol_ratio.set_title(f"Volume imbalance % (above - below) / total, rolling over {roll_window} bars", fontsize=7)
             ax_vol_ratio.set_ylabel("imb %", fontsize=7)
             ax_vol_ratio.tick_params(axis="x", rotation=45, labelsize=7)
             ax_vol_ratio.tick_params(axis="y", labelsize=7)
@@ -471,6 +552,8 @@ def plot_entries_exits(
     ]
     for wh in WINDOW_HOURS:
         handles.append(Line2D([0], [0], color=WINDOW_COLORS.get(wh, "gray"), lw=3, label=f"T-{wh}h"))
+    # Anchored mean volume line
+    handles.append(Line2D([0], [0], color="#00008B", lw=1.6, linestyle="--", label="Anchored mean vol"))
 
     fig.legend(
         handles=handles,

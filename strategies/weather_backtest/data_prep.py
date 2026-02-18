@@ -30,13 +30,20 @@ def _load_event_rows(event_slug: str) -> pd.DataFrame:
 def _build_matrices(
     df: pd.DataFrame,
     resample_rule: str | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None]:
 
     last_value: Callable[[pd.Series], float] = lambda x: float(x.iloc[-1])
     closes = df.pivot_table(index="_ts", columns="market", values="close", aggfunc=last_value)
 
     # Raw volume matrix (sum over duplicate timestamps if present).
     volumes = df.pivot_table(index="_ts", columns="market", values="volume", aggfunc="sum")
+
+    # Optional buy/sell per-update volumes, if present in raw rows.
+    buy_volumes = None
+    sell_volumes = None
+    if "buy_volume" in df.columns and "sell_volume" in df.columns:
+        buy_volumes = df.pivot_table(index="_ts", columns="market", values="buy_volume", aggfunc="sum")
+        sell_volumes = df.pivot_table(index="_ts", columns="market", values="sell_volume", aggfunc="sum")
 
     # Source-row VWAP weighted by volume.
     df = df.copy()
@@ -46,6 +53,10 @@ def _build_matrices(
     closes = closes.sort_index().ffill().dropna(axis=1, how="all")
     volumes = volumes.reindex(closes.index).fillna(0.0).reindex(columns=closes.columns)
     src_vwap_values = src_vwap_values.reindex(closes.index).reindex(columns=closes.columns)
+    if buy_volumes is not None:
+        buy_volumes = buy_volumes.reindex(closes.index).reindex(columns=closes.columns).fillna(0.0)
+    if sell_volumes is not None:
+        sell_volumes = sell_volumes.reindex(closes.index).reindex(columns=closes.columns).fillna(0.0)
 
     # Instantaneous bar VWAP from source column, volume-weighted over
     # duplicate timestamps for each market.
@@ -62,10 +73,14 @@ def _build_matrices(
     vwaps = vwaps.reindex(closes.index)
 
     if not resample_rule:
-        return closes, vwaps, volumes
+        return closes, vwaps, volumes, buy_volumes, sell_volumes
 
     closes = closes.resample(resample_rule).last().ffill()
     volumes = volumes.resample(resample_rule).sum().fillna(0.0).reindex(columns=closes.columns)
+    if buy_volumes is not None:
+        buy_volumes = buy_volumes.resample(resample_rule).sum().fillna(0.0).reindex(columns=closes.columns)
+    if sell_volumes is not None:
+        sell_volumes = sell_volumes.resample(resample_rule).sum().fillna(0.0).reindex(columns=closes.columns)
 
     # Resampled VWAP = sum(vwap * volume) / sum(volume), still no forward-fill.
     weighted = (vwaps * volumes.reindex(vwaps.index).fillna(0.0)).resample(resample_rule).sum()
@@ -74,8 +89,12 @@ def _build_matrices(
 
     closes = closes.dropna(axis=0, how="any")
     volumes = volumes.reindex(closes.index).fillna(0.0)
+    if buy_volumes is not None:
+        buy_volumes = buy_volumes.reindex(closes.index).fillna(0.0)
+    if sell_volumes is not None:
+        sell_volumes = sell_volumes.reindex(closes.index).fillna(0.0)
     vwaps = vwaps.reindex(closes.index)
-    return closes, vwaps, volumes
+    return closes, vwaps, volumes, buy_volumes, sell_volumes
 
 
 def load_event_ohlcv(event_slug: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:

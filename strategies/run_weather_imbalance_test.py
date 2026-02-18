@@ -32,7 +32,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--event-slug",
-        default="highest-temperature-in-nyc-on-february-16-2026",
+        default="highest-temperature-in-nyc-on-february-18-2026",
         help="Event slug to test",
     )
     parser.add_argument(
@@ -58,7 +58,7 @@ def main() -> None:
         print(f"Resample rule: {resample_rule}")
     print("VWAP source: data.zip vwap column")
 
-    prices, vwap, volume = load_event_ohlcv_resampled(
+    prices, vwap, volume, buy_volume, sell_volume = load_event_ohlcv_resampled(
         event_slug,
         resample_rule=resample_rule,
     )
@@ -108,6 +108,8 @@ def main() -> None:
         out_path=plot_path,
         vwap=vwap,
         volume=volume,
+        buy_volume=buy_volume,
+        sell_volume=sell_volume,
         vwap_slope_mode=strategy.vwap_slope_mode,
         vwap_slope_value_per_point=strategy.vwap_slope_value_per_point,
         vwap_slope_scale=strategy.vwap_slope_scale,
