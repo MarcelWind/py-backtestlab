@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import matplotlib.dates as mdates
+import re
 from matplotlib.lines import Line2D
 
 from market_regime_analysis import (
@@ -67,7 +68,64 @@ def plot_entries_exits(
     Middle panel shows rolling VWAP slope.
     Bottom panel shows rolling mean-reversion score (0..1).
     """
+    # Try to reuse the same outcome selection logic as plot_event_markets.py
+    # by loading the raw event rows and picking the preferred outcome ('yes').
     markets = list(prices.columns)
+    preferred_outcome = "no"
+    try:
+        # Import helpers here to avoid package import cycles
+        from .data_prep import pick_plot_frame
+
+        df_prep = pd.DataFrame()  # Placeholder if load_and_prepare is not available
+        plot_df = pick_plot_frame(df_prep, prefer_outcome=preferred_outcome)
+        preferred_set = set(plot_df["market"].astype(str).unique())
+        # Intersect with available price columns preserving order
+        markets = [m for m in prices.columns if str(m) in preferred_set]
+    except Exception:
+        # Fallback: when both `__yes` and `__no` exist prefer the
+        # configured `preferred_outcome` (defaults to 'yes' behavior
+        # historically). This ensures callers that set
+        # `preferred_outcome = 'no'` actually get the `__no` columns.
+        suffix_re = re.compile(r"^(.*)__(yes|no)$", re.IGNORECASE)
+        orig_markets = [str(m) for m in markets]
+        orig_set = set(orig_markets)
+        selected_markets: list[str] = []
+        handled: set[str] = set()
+        pref = None
+        if 'preferred_outcome' in locals() and isinstance(preferred_outcome, str):
+            pref = preferred_outcome.lower()
+        for m in orig_markets:
+            if m in handled:
+                continue
+            m_match = suffix_re.match(m)
+            if m_match:
+                base = m_match.group(1)
+                yes_name = f"{base}__yes"
+                no_name = f"{base}__no"
+                # If both exist, choose according to `pref` (if set),
+                # otherwise keep legacy behavior (prefer yes).
+                if yes_name in orig_set and no_name in orig_set:
+                    if pref == 'no':
+                        selected_markets.append(no_name)
+                    else:
+                        selected_markets.append(yes_name)
+                    handled.add(yes_name)
+                    handled.add(no_name)
+                elif yes_name in orig_set:
+                    selected_markets.append(yes_name)
+                    handled.add(yes_name)
+                    handled.add(no_name)
+                elif no_name in orig_set:
+                    selected_markets.append(no_name)
+                    handled.add(yes_name)
+                    handled.add(no_name)
+                else:
+                    selected_markets.append(m)
+                    handled.add(m)
+            else:
+                selected_markets.append(m)
+                handled.add(m)
+        markets = selected_markets
     if not markets:
         return
 
@@ -221,6 +279,8 @@ def plot_entries_exits(
         ax_meanrev = axes[grid_row * 5 + 4, grid_col]
 
         series = prices[market].dropna()
+        # Human-friendly display name: strip __yes/__no suffix for titles
+        display_market = suffix_re.sub(r"\1", str(market)) if 'suffix_re' in locals() else re.sub(r"__(yes|no)$", "", str(market), flags=re.IGNORECASE)
         if series.empty:
             continue
 
@@ -277,7 +337,7 @@ def plot_entries_exits(
         else:
             trade_info = "trades=0"
 
-        ax.set_title(f"{market}\nFull: {full_regime} ({full_conf:.2f}) — {windows_str}\n{trade_info}", fontsize=8)
+        ax.set_title(f"{display_market}\nFull: {full_regime} ({full_conf:.2f}) — {windows_str}\n{trade_info}", fontsize=8)
         ax.tick_params(axis="x", rotation=45, labelbottom=True, labelsize=8)
         ax.grid(alpha=0.3)
 
@@ -323,7 +383,7 @@ def plot_entries_exits(
 
             ax_vol_twin.bar(vol_for_profile.index, vol_for_profile.values, width=bar_width_days, color="#8B0000", alpha=0.35, align="center", edgecolor="none")
             ax_vol_twin.set_ylabel("vol", fontsize=7)
-            ax_vol_twin.set_ylim(0, float(np.nanmax(vol_for_profile.values)) * 1.1 if len(vol_for_profile) else 1.0)
+            ax_vol_twin.set_ylim(0, float(np.nanmax(vol_for_profile.to_numpy(dtype=float))) * 1.1 if len(vol_for_profile) else 1.0)
             ax_vol_twin.tick_params(axis="y", labelsize=7)
             # Anchored cumulative average of volume (anchored at the start of the plotted series)
             try:

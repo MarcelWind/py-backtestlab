@@ -1,15 +1,117 @@
 from typing import Callable
 
+import io
+import zipfile
+
 import pandas as pd
 
-from fetch_data import load_zip
+_SUFFIX_RE = r"__(?:yes|no)$"
 
 
-def _load_event_rows(event_slug: str) -> pd.DataFrame:
+def load_zip(zip_path: str = "data.zip") -> pd.DataFrame:
+    """Load all parquet files from a zip into a single DataFrame.
+
+    Adds 'event_slug' and 'market' columns derived from the file paths.
+    """
+    frames = []
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for name in zf.namelist():
+            parts = name.replace("\\", "/").split("/")
+            if len(parts) != 3 or not parts[2].endswith(".parquet") or parts[1] == "unknown":
+                continue
+            event_slug = parts[1]
+            market = parts[2].removesuffix(".parquet")
+            df = pd.read_parquet(io.BytesIO(zf.read(name)))
+            df["event_slug"] = event_slug
+            df["market"] = market
+            frames.append(df)
+
+    if not frames:
+        raise FileNotFoundError(f"No parquet data found in {zip_path}")
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.sort_values(["event_slug", "market", "timestamp"]).reset_index(drop=True)
+    return combined
+
+
+def normalize_market_outcomes(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    if "market" not in out.columns:
+        raise ValueError("Expected 'market' column in dataframe")
+
+    market_raw = out["market"].astype(str)
+    has_suffix = market_raw.str.contains(_SUFFIX_RE, regex=True)
+    suffix_outcome = market_raw.str.extract(r"__(yes|no)$", expand=False)
+
+    out["market"] = market_raw.str.replace(_SUFFIX_RE, "", regex=True)
+
+    if "outcome" not in out.columns:
+        out["outcome"] = ""
+
+    out["outcome"] = out["outcome"].fillna("").astype(str).str.strip().str.lower()
+
+    fill_mask = out["outcome"].eq("") & suffix_outcome.notna()
+    out.loc[fill_mask, "outcome"] = suffix_outcome[fill_mask]
+
+    conflict_mask = suffix_outcome.notna() & out["outcome"].ne("") & out["outcome"].ne(suffix_outcome)
+    out = out[~conflict_mask].copy()
+
+    out["_has_suffix"] = has_suffix.loc[out.index].astype(int)
+
+    if "timestamp" in out.columns:
+        sort_cols = ["_has_suffix", "timestamp"]
+        out = out.sort_values(sort_cols, ascending=[False, True])
+
+        subset_cols: list[str] = []
+        for col in ["event_slug", "asset_id", "market", "outcome", "timestamp"]:
+            if col in out.columns:
+                subset_cols.append(col)
+
+        if subset_cols:
+            out = out.drop_duplicates(subset=subset_cols, keep="first")
+
+        out = out.drop(columns=["_has_suffix"], errors="ignore").reset_index(drop=True)
+    
+    return out
+
+
+    def load_and_prepare(
+        zip_path: str = "data.zip",
+        event_slug: str | None = None,
+    ) -> pd.DataFrame:
+        df = load_zip(zip_path)
+        if event_slug:
+            df = df[df["event_slug"] == event_slug].copy()
+        return normalize_market_outcomes(df)
+
+
+def pick_plot_frame(df: pd.DataFrame, prefer_outcome: str | None = None) -> pd.DataFrame:
+    out = df.copy()
+    if prefer_outcome and "outcome" in out.columns:
+        target = prefer_outcome.strip().lower()
+        out = out[out["outcome"].astype(str).str.lower() == target].copy()
+    return out
+
+
+def _load_event_rows(event_slug: str, prefer_outcome: str | None = None) -> pd.DataFrame:
     df = load_zip()
     df = df[df["event_slug"] == event_slug].copy()
     if df.empty:
         raise ValueError(f"No rows found for event_slug={event_slug!r}")
+
+    # Normalize market outcome suffixes and optionally filter to preferred outcome
+    try:
+        df = normalize_market_outcomes(df)
+    except Exception:
+        # If normalization fails, continue with raw df
+        pass
+
+    if prefer_outcome:
+        try:
+            df = pick_plot_frame(df, prefer_outcome=prefer_outcome)
+        except Exception:
+            pass
 
     if "datetime" in df.columns:
         ts = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
@@ -97,21 +199,26 @@ def _build_matrices(
     return closes, vwaps, volumes, buy_volumes, sell_volumes
 
 
-def load_event_ohlcv(event_slug: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load one Polymarket event and build close/vwap/volume matrices."""
-    df = _load_event_rows(event_slug)
+def load_event_ohlcv(event_slug: str, prefer_outcome: str | None = "yes") -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None]:
+    """Load one Polymarket event and build close/vwap/volume matrices.
+
+    By default this will prefer the `yes` outcome token when markets are
+    suffixed with `__yes`/`__no`.
+    """
+    df = _load_event_rows(event_slug, prefer_outcome=prefer_outcome)
     return _build_matrices(df, resample_rule=None)
 
 
 def load_event_ohlcv_resampled(
     event_slug: str,
     resample_rule: str | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    prefer_outcome: str | None = "yes",
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None]:
     """Load event OHLCV and optionally downsample bars.
 
     Args:
         event_slug: Event identifier.
         resample_rule: Pandas rule (e.g. "5min", "10min"). If None, no resample.
     """
-    df = _load_event_rows(event_slug)
+    df = _load_event_rows(event_slug, prefer_outcome=prefer_outcome)
     return _build_matrices(df, resample_rule=resample_rule)

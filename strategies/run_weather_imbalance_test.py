@@ -32,7 +32,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--event-slug",
-        default="highest-temperature-in-nyc-on-february-18-2026",
+        default="highest-temperature-in-seattle-on-february-20-2026",
         help="Event slug to test",
     )
     parser.add_argument(
@@ -41,13 +41,19 @@ def main() -> None:
         default=5,
         help="Optional bar downsampling for speed (e.g. 5, 10). 0 keeps native bars.",
     )
+    parser.add_argument(
+        "--prefer-outcome",
+        choices=["yes", "no"],
+        default="yes",
+        help="Prefer this outcome token when markets are suffixed with __yes/__no",
+    )
     args = parser.parse_args()
 
     event_slug = args.event_slug
     resample_rule = f"{args.resample_minutes}min" if args.resample_minutes and args.resample_minutes > 0 else None
 
     timestamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d_%H%M%S")
-    out_dir = RESULTS_DIR / "weather_imbalance_test" / timestamp / event_slug
+    out_dir = RESULTS_DIR / "weather_imbalance_test" / event_slug / timestamp
     out_dir.mkdir(parents=True, exist_ok=True)
 
     active_profile_params = WeatherMarketImbalanceStrategy.profile_params(args.profile)
@@ -58,9 +64,10 @@ def main() -> None:
         print(f"Resample rule: {resample_rule}")
     print("VWAP source: data.zip vwap column")
 
-    prices, vwap, volume, buy_volume, sell_volume = load_event_ohlcv_resampled(
+    prices, vwap, volume, buy_volume, sell_volume = load_event_ohlcv_resampled( # type: ignore
         event_slug,
         resample_rule=resample_rule,
+        prefer_outcome=args.prefer_outcome,
     )
 
     strategy = WeatherMarketImbalanceStrategy.from_profile(args.profile, vwap=vwap, volume=volume)
