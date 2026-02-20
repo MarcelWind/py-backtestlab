@@ -71,6 +71,8 @@ def plot_entries_exits(
     # Try to reuse the same outcome selection logic as plot_event_markets.py
     # by loading the raw event rows and picking the preferred outcome ('yes').
     markets = list(prices.columns)
+    # Regex to split base market names from __yes/__no suffixes
+    suffix_re = re.compile(r"^(.*)__(yes|no)$", re.IGNORECASE)
     preferred_outcome = "no"
     try:
         # Import helpers here to avoid package import cycles
@@ -131,13 +133,14 @@ def plot_entries_exits(
 
     cols = 2
     rows = (len(markets) + cols - 1) // cols
-    # Add panels for volume and imbalance percent.
+    # Add panels for two buy-volume rows plus volume and imbalance percent.
+    # We now use 7 panels per market: price, buy_no, buy_yes, instant vol, vol_imbalance, slope, meanrev
     fig, axes = plt.subplots(
-        rows * 5,
+        rows * 7,
         cols,
-        figsize=(14, 9.6 * rows),
+        figsize=(16, 13 * rows),
         sharex="col",
-        gridspec_kw={"height_ratios": [3, 0.8, 0.7, 1, 1] * rows},
+        gridspec_kw={"height_ratios": [3, 0.9, 0.9, 1.0, 0.9, 1.2, 1.2] * rows},
     )
 
     if isinstance(axes, np.ndarray):
@@ -272,11 +275,13 @@ def plot_entries_exits(
     for idx, market in enumerate(markets):
         grid_row = idx // cols
         grid_col = idx % cols
-        ax = axes[grid_row * 5, grid_col]
-        ax_vol = axes[grid_row * 5 + 1, grid_col]
-        ax_vol_ratio = axes[grid_row * 5 + 2, grid_col]
-        ax_slope = axes[grid_row * 5 + 3, grid_col]
-        ax_meanrev = axes[grid_row * 5 + 4, grid_col]
+        ax = axes[grid_row * 7, grid_col]
+        ax_buy_no = axes[grid_row * 7 + 1, grid_col]
+        ax_buy_yes = axes[grid_row * 7 + 2, grid_col]
+        ax_vol = axes[grid_row * 7 + 3, grid_col]
+        ax_vol_ratio = axes[grid_row * 7 + 4, grid_col]
+        ax_slope = axes[grid_row * 7 + 5, grid_col]
+        ax_meanrev = axes[grid_row * 7 + 6, grid_col]
 
         series = prices[market].dropna()
         # Human-friendly display name: strip __yes/__no suffix for titles
@@ -285,6 +290,18 @@ def plot_entries_exits(
             continue
 
         mdf = pd.DataFrame({"timestamp": pd.to_datetime(series.index), "price": series.values}).sort_values("timestamp")
+
+        # Estimate bar width (days) for bar plots (used by buy-volume and instant vol)
+        try:
+            idx_dt = pd.DatetimeIndex(series.index)
+            if len(idx_dt) >= 2:
+                median_delta = (idx_dt.to_series().diff().median()).to_timedelta64()
+                median_td = pd.Timedelta(median_delta)
+                bar_width_days = float(median_td / pd.Timedelta(days=1))
+            else:
+                bar_width_days = 15.0 / 1440.0
+        except Exception:
+            bar_width_days = 15.0 / 1440.0
 
         bands_full = rolling_sd_bands(mdf)
         t_full = bands_full["timestamp"].values
@@ -368,19 +385,6 @@ def plot_entries_exits(
         if vol_for_profile is not None and len(vol_for_profile):
             # Create twin axis for volume bars
             ax_vol_twin = ax.twinx()
-            # Estimate bar width in matplotlib date units (days)
-            try:
-                idx = pd.DatetimeIndex(vol_for_profile.index)
-                if len(idx) >= 2:
-                    median_delta = (idx.to_series().diff().median()).to_timedelta64()
-                    # convert numpy timedelta64 to pandas Timedelta via astype('timedelta64[ns]') path
-                    median_td = pd.Timedelta(median_delta)
-                    bar_width_days = float(median_td / pd.Timedelta(days=1))
-                else:
-                    bar_width_days = 15.0 / 1440.0
-            except Exception:
-                bar_width_days = 15.0 / 1440.0
-
             ax_vol_twin.bar(vol_for_profile.index, vol_for_profile.values, width=bar_width_days, color="#8B0000", alpha=0.35, align="center", edgecolor="none")
             ax_vol_twin.set_ylabel("vol", fontsize=7)
             ax_vol_twin.set_ylim(0, float(np.nanmax(vol_for_profile.to_numpy(dtype=float))) * 1.1 if len(vol_for_profile) else 1.0)
@@ -423,34 +427,101 @@ def plot_entries_exits(
             # keep x ticks on the main axis only (do not remove ticks on the
             # underlying `ax_vol`, which should display the time axis)
 
-            # Plot per-market instant delta (buy minus sell volume)
-            # whenever `buy_volume` and `sell_volume` matrices are available.
-            plotted = False
-            if buy_volume is not None and sell_volume is not None and market in buy_volume.columns and market in sell_volume.columns:
-                buy_ser = buy_volume[market].reindex(series.index).fillna(0.0)
-                sell_ser = sell_volume[market].reindex(series.index).fillna(0.0)
-                delta_inst = buy_ser - sell_ser
-                # Determine bar width (days) if previously computed, else default
-                try:
-                    bw = locals().get('bar_width_days', 15.0 / 1440.0)
-                except Exception:
-                    bw = 15.0 / 1440.0
-                ax_vol.bar(delta_inst.index, delta_inst.values, width=bw, color="#000000", alpha=0.9, align="center", edgecolor="none")
-                ax_vol.set_ylabel("inst buy-sell vol", fontsize=7)
-                ax_vol.tick_params(axis="x", rotation=45, labelsize=7)
-                ax_vol.tick_params(axis="y", labelsize=7)
-                ax_vol.grid(alpha=0.18)
-                # soft zero line for quick visual reference
-                ax_vol.axhline(0.0, color="#888888", linestyle="-", linewidth=0.8, alpha=0.6, zorder=1)
-                # show time-formatted x-axis on the delta subplot
-                ax_vol.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m %H:%M'))
-                ax_vol.set_xlim(ax.get_xlim())
-                plotted = True
-
-            if not plotted:
-                # No per-market buy/sell data; hide the subplot to keep layout compact.
-                ax_vol.set_visible(False)
         else:
+            ax_vol.set_visible(False)
+
+        # New panels: buy volume for no outcome and buy volume for yes outcome
+        # Determine base market name (strip __yes/__no if present)
+        m_match = suffix_re.match(str(market))
+        base_name = m_match.group(1) if m_match else str(market)
+
+        # Determine which columns in `buy_volume` correspond to this market's
+        # yes/no outcomes. If the buy matrix only contains the base market
+        # (no suffix), map that base only to the same outcome as the current
+        # `market` variable (when the market itself is suffixed). This avoids
+        # plotting the same base column into both panels.
+        def _select_buy_cols(buy_df: pd.DataFrame | None, base: str, market_str: str):
+            if buy_df is None:
+                return None, None
+            cols = [str(c) for c in buy_df.columns]
+            cand_no = None
+            cand_yes = None
+            exact_no = f"{base}__no"
+            exact_yes = f"{base}__yes"
+            if exact_no in cols:
+                cand_no = exact_no
+            if exact_yes in cols:
+                cand_yes = exact_yes
+            # try case-insensitive matches
+            if cand_no is None:
+                for c in cols:
+                    if c.lower().startswith(base.lower()) and c.lower().endswith("__no"):
+                        cand_no = c
+                        break
+            if cand_yes is None:
+                for c in cols:
+                    if c.lower().startswith(base.lower()) and c.lower().endswith("__yes"):
+                        cand_yes = c
+                        break
+            # fallback: if only base column exists, map it only to the market's
+            # suffix (when market has a suffix), otherwise don't map to both.
+            if (cand_no is None or cand_yes is None) and base in cols:
+                m_m = suffix_re.match(market_str)
+                if m_m:
+                    suffix = m_m.group(2).lower()
+                    if suffix == "no":
+                        cand_no = cand_no or base
+                    elif suffix == "yes":
+                        cand_yes = cand_yes or base
+            return cand_no, cand_yes
+
+        no_col, yes_col = _select_buy_cols(buy_volume, base_name, str(market))
+
+        # --- buy vol (no) panel ---
+        plotted_buy_no = False
+        if buy_volume is not None and no_col is not None:
+            no_ser = buy_volume[no_col].reindex(series.index).fillna(0.0)
+            ax_buy_no.bar(no_ser.index, no_ser.values, width=bar_width_days, color="#8B0000", alpha=0.6, align="center", edgecolor="none")
+            ax_buy_no.set_title("buy vol (no)", fontsize=7, loc="left", pad=2)
+            ax_buy_no.tick_params(axis="x", rotation=45, labelsize=7)
+            ax_buy_no.tick_params(axis="y", labelsize=7)
+            ax_buy_no.grid(alpha=0.18)
+            ax_buy_no.set_xlim(ax.get_xlim())
+            plotted_buy_no = True
+        if not plotted_buy_no:
+            ax_buy_no.set_visible(False)
+
+        # --- buy vol (yes) panel ---
+        plotted_buy_yes = False
+        if buy_volume is not None and yes_col is not None:
+            yes_ser = buy_volume[yes_col].reindex(series.index).fillna(0.0)
+            ax_buy_yes.bar(yes_ser.index, yes_ser.values, width=bar_width_days, color="#006400", alpha=0.6, align="center", edgecolor="none")
+            ax_buy_yes.set_title("buy vol (yes)", fontsize=7, loc="left", pad=2)
+            ax_buy_yes.tick_params(axis="x", rotation=45, labelsize=7)
+            ax_buy_yes.tick_params(axis="y", labelsize=7)
+            ax_buy_yes.grid(alpha=0.18)
+            ax_buy_yes.set_xlim(ax.get_xlim())
+            plotted_buy_yes = True
+        if not plotted_buy_yes:
+            ax_buy_yes.set_visible(False)
+
+        # --- buy vol yes−no delta panel (ax_vol) ---
+        plotted_vol = False
+        if buy_volume is not None and yes_col is not None and no_col is not None:
+            yes_ser_v = buy_volume[yes_col].reindex(series.index).fillna(0.0)
+            no_ser_v = buy_volume[no_col].reindex(series.index).fillna(0.0)
+            delta_yn = yes_ser_v - no_ser_v
+            colors_yn = ["#006400" if v >= 0 else "#8B0000" for v in delta_yn.values]
+            ax_vol.bar(delta_yn.index, delta_yn.values, width=bar_width_days, color=colors_yn, alpha=0.75, align="center", edgecolor="none")
+            ax_vol.set_title("buy vol Δ (yes − no)", fontsize=7, loc="left", pad=2)
+            ax_vol.tick_params(axis="x", rotation=45, labelsize=7)
+            ax_vol.tick_params(axis="y", labelsize=7)
+            ax_vol.grid(alpha=0.18)
+            ax_vol.axhline(0.0, color="#888888", linestyle="-", linewidth=0.8, alpha=0.6, zorder=1)
+            ax_vol.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m %H:%M'))
+            ax_vol.set_xlim(ax.get_xlim())
+            plotted_vol = True
+        if not plotted_vol:
             ax_vol.set_visible(False)
 
         # Volume imbalance percent panel
@@ -474,8 +545,7 @@ def plot_entries_exits(
                 entry_times = pd.to_datetime(market_trades["entry_time"])
                 ratio_at_entry = ratio_pct.reindex(entry_times).to_numpy(dtype=float)
                 ax_vol_ratio.scatter(entry_times, ratio_at_entry, marker="v", s=22, color="#8B0000", zorder=6)
-            ax_vol_ratio.set_title(f"Volume imbalance % (above - below) / total, rolling over {roll_window} bars", fontsize=7)
-            ax_vol_ratio.set_ylabel("imb %", fontsize=7)
+            ax_vol_ratio.set_title(f"vol imbalance % (above−below)/total · rolling {roll_window} bars", fontsize=7, loc="left", pad=2)
             ax_vol_ratio.tick_params(axis="x", rotation=45, labelsize=7)
             ax_vol_ratio.tick_params(axis="y", labelsize=7)
             ax_vol_ratio.grid(alpha=0.18)
@@ -543,14 +613,13 @@ def plot_entries_exits(
                     pad = (hi - lo) * 0.12
                     ax_slope.set_ylim(lo - pad, hi + pad)
 
-            ax_slope.set_ylabel("slope", fontsize=7)
             mode_label = vwap_slope_mode
             if vwap_slope_mode != "raw":
                 mode_label += f", vpp={vwap_slope_value_per_point:g}, scale={vwap_slope_scale:g}"
             update_pct = float(valid_vwap_mask.mean() * 100.0) if len(valid_vwap_mask) else 0.0
             ax_slope.set_title(
-                f"VWAP slope [{mode_label}] (symlog y, lookback={vwap_slope_lookback} bars, updates={update_pct:.1f}%)",
-                fontsize=7,
+                f"VWAP slope [{mode_label}] · symlog y · lb={vwap_slope_lookback} bars · upd={update_pct:.1f}%",
+                fontsize=7, loc="left", pad=2,
             )
             ax_slope.tick_params(axis="x", rotation=45, labelsize=7)
             ax_slope.tick_params(axis="y", labelsize=7)
@@ -582,11 +651,10 @@ def plot_entries_exits(
             mr_at_entry = mr_score.reindex(entry_times).to_numpy(dtype=float)
             ax_meanrev.scatter(entry_times, mr_at_entry, marker="v", s=22, color="#8B0000", zorder=6)
 
-        ax_meanrev.set_ylabel("mr", fontsize=7)
         ax_meanrev.set_ylim(-0.02, 1.02)
         ax_meanrev.set_title(
-            f"Mean-reversion score (window={mean_reversion_window}, threshold={mean_reversion_threshold if mean_reversion_threshold is not None else 'n/a'})",
-            fontsize=7,
+            f"mean-rev score · window={mean_reversion_window} · thr={mean_reversion_threshold if mean_reversion_threshold is not None else 'n/a'}",
+            fontsize=7, loc="left", pad=2,
         )
         ax_meanrev.tick_params(axis="x", rotation=45, labelsize=7)
         ax_meanrev.tick_params(axis="y", labelsize=7)
@@ -597,11 +665,13 @@ def plot_entries_exits(
     for i in range(len(markets), total_slots):
         grid_row = i // cols
         grid_col = i % cols
-        axes[grid_row * 5, grid_col].set_visible(False)
-        axes[grid_row * 5 + 1, grid_col].set_visible(False)
-        axes[grid_row * 5 + 2, grid_col].set_visible(False)
-        axes[grid_row * 5 + 3, grid_col].set_visible(False)
-        axes[grid_row * 5 + 4, grid_col].set_visible(False)
+        axes[grid_row * 7, grid_col].set_visible(False)
+        axes[grid_row * 7 + 1, grid_col].set_visible(False)
+        axes[grid_row * 7 + 2, grid_col].set_visible(False)
+        axes[grid_row * 7 + 3, grid_col].set_visible(False)
+        axes[grid_row * 7 + 4, grid_col].set_visible(False)
+        axes[grid_row * 7 + 5, grid_col].set_visible(False)
+        axes[grid_row * 7 + 6, grid_col].set_visible(False)
 
     handles = [
         Line2D([0], [0], marker="v", color="w", markerfacecolor="#8B0000", markersize=7, label="Short Entry"),

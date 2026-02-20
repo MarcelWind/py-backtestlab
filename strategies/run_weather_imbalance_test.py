@@ -32,7 +32,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--event-slug",
-        default="highest-temperature-in-seattle-on-february-20-2026",
+        default="highest-temperature-in-nyc-on-february-20-2026",
         help="Event slug to test",
     )
     parser.add_argument(
@@ -69,6 +69,18 @@ def main() -> None:
         resample_rule=resample_rule,
         prefer_outcome=args.prefer_outcome,
     )
+
+    # Also load unfiltered matrices (no prefer_outcome) so plotting can
+    # access both `__yes` and `__no` outcome columns when available.
+    try:
+        _p, _v, _vol, buy_volume_full, sell_volume_full = load_event_ohlcv_resampled(
+            event_slug,
+            resample_rule=resample_rule,
+            prefer_outcome=None,
+        )
+    except Exception:
+        buy_volume_full = buy_volume
+        sell_volume_full = sell_volume
 
     strategy = WeatherMarketImbalanceStrategy.from_profile(args.profile, vwap=vwap, volume=volume)
     backtester = Backtester(strategy=strategy, rebalance_freq=1)
@@ -115,8 +127,11 @@ def main() -> None:
         out_path=plot_path,
         vwap=vwap,
         volume=volume,
-        buy_volume=buy_volume,
-        sell_volume=sell_volume,
+        # prefer passing the unfiltered buy/sell matrices so both
+        # `__yes` and `__no` outcome columns (if present) can be plotted
+        # regardless of the strategy's `prefer_outcome` used for backtesting.
+        buy_volume=buy_volume_full,
+        sell_volume=sell_volume_full,
         vwap_slope_mode=strategy.vwap_slope_mode,
         vwap_slope_value_per_point=strategy.vwap_slope_value_per_point,
         vwap_slope_scale=strategy.vwap_slope_scale,

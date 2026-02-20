@@ -41,6 +41,8 @@ def normalize_market_outcomes(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("Expected 'market' column in dataframe")
 
     market_raw = out["market"].astype(str)
+    # Preserve the original market string (including any __yes/__no suffix)
+    out["market_raw"] = market_raw
     has_suffix = market_raw.str.contains(_SUFFIX_RE, regex=True)
     suffix_outcome = market_raw.str.extract(r"__(yes|no)$", expand=False)
 
@@ -143,9 +145,24 @@ def _build_matrices(
     # Optional buy/sell per-update volumes, if present in raw rows.
     buy_volumes = None
     sell_volumes = None
+    # Build per-update buy/sell matrices keyed by "market__outcome" so
+    # yes and no tokens get separate columns (e.g. "35-f-or-below__yes"
+    # and "35-f-or-below__no"). Fall back to plain market name when the
+    # outcome column is absent or empty.
     if "buy_volume" in df.columns and "sell_volume" in df.columns:
-        buy_volumes = df.pivot_table(index="_ts", columns="market", values="buy_volume", aggfunc="sum")
-        sell_volumes = df.pivot_table(index="_ts", columns="market", values="sell_volume", aggfunc="sum")
+        df_bv = df.copy()
+        if "outcome" in df_bv.columns:
+            mask = df_bv["outcome"].astype(str).str.strip().str.lower().isin(["yes", "no"])
+            df_bv.loc[mask, "_market_key"] = (
+                df_bv.loc[mask, "market"].astype(str)
+                + "__"
+                + df_bv.loc[mask, "outcome"].astype(str).str.strip().str.lower()
+            )
+            df_bv.loc[~mask, "_market_key"] = df_bv.loc[~mask, "market"].astype(str)
+        else:
+            df_bv["_market_key"] = df_bv["market"].astype(str)
+        buy_volumes = df_bv.pivot_table(index="_ts", columns="_market_key", values="buy_volume", aggfunc="sum")
+        sell_volumes = df_bv.pivot_table(index="_ts", columns="_market_key", values="sell_volume", aggfunc="sum")
 
     # Source-row VWAP weighted by volume.
     df = df.copy()
@@ -156,9 +173,9 @@ def _build_matrices(
     volumes = volumes.reindex(closes.index).fillna(0.0).reindex(columns=closes.columns)
     src_vwap_values = src_vwap_values.reindex(closes.index).reindex(columns=closes.columns)
     if buy_volumes is not None:
-        buy_volumes = buy_volumes.reindex(closes.index).reindex(columns=closes.columns).fillna(0.0)
+        buy_volumes = buy_volumes.reindex(closes.index).fillna(0.0)
     if sell_volumes is not None:
-        sell_volumes = sell_volumes.reindex(closes.index).reindex(columns=closes.columns).fillna(0.0)
+        sell_volumes = sell_volumes.reindex(closes.index).fillna(0.0)
 
     # Instantaneous bar VWAP from source column, volume-weighted over
     # duplicate timestamps for each market.
@@ -180,9 +197,9 @@ def _build_matrices(
     closes = closes.resample(resample_rule).last().ffill()
     volumes = volumes.resample(resample_rule).sum().fillna(0.0).reindex(columns=closes.columns)
     if buy_volumes is not None:
-        buy_volumes = buy_volumes.resample(resample_rule).sum().fillna(0.0).reindex(columns=closes.columns)
+        buy_volumes = buy_volumes.resample(resample_rule).sum().fillna(0.0)
     if sell_volumes is not None:
-        sell_volumes = sell_volumes.resample(resample_rule).sum().fillna(0.0).reindex(columns=closes.columns)
+        sell_volumes = sell_volumes.resample(resample_rule).sum().fillna(0.0)
 
     # Resampled VWAP = sum(vwap * volume) / sum(volume), still no forward-fill.
     weighted = (vwaps * volumes.reindex(vwaps.index).fillna(0.0)).resample(resample_rule).sum()
