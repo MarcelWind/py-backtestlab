@@ -3,6 +3,7 @@ import pandas as pd
 from typing import Any, cast
 
 from stratlab.strategy.base import Strategy
+from stratlab.strategy.indicators import BandPosition, MeanReversion, VwapSlope, VwapVolumeImbalance
 
 
 PROFILE_PRESETS: dict[str, dict[str, object]] = {
@@ -192,6 +193,40 @@ class WeatherMarketImbalanceStrategy(Strategy):
         self._positions: dict[str, dict[str, object]] = {}
         self.trade_log: list[dict[str, object]] = []
 
+        _vwap = vwap if vwap is not None else pd.DataFrame()
+        _volume = volume if volume is not None else pd.DataFrame()
+        self.indicator_defs = [
+            VwapSlope(
+                vwap=_vwap,
+                volume=_volume,
+                lookback=self.vwap_slope_lookback,
+                mode=self.vwap_slope_mode,
+                value_per_point=self.vwap_slope_value_per_point,
+                scale=self.vwap_slope_scale,
+            ),
+            VwapSlope(
+                vwap=_vwap,
+                volume=_volume,
+                lookback=self.vwap_slope_lookback,
+                mode="raw",
+                name="vwap_slope_raw",
+            ),
+            VwapVolumeImbalance(
+                vwap=_vwap,
+                volume=_volume,
+                lookback=self.vwap_volume_imbalance_lookback,
+            ),
+            BandPosition(
+                lookback_hours=lookback_hours,
+                lookback_bars=int(lookback) if lookback_hours is None else None,
+            ),
+            MeanReversion(
+                window=self.mean_reversion_window,
+                lookback_hours=lookback_hours,
+                lookback_bars=int(lookback) if lookback_hours is None else None,
+            ),
+        ]
+
     @classmethod
     def available_profiles(cls) -> list[str]:
         return sorted(PROFILE_PRESETS.keys())
@@ -213,57 +248,21 @@ class WeatherMarketImbalanceStrategy(Strategy):
         params.update(overrides)
         return cls(**params)
 
-    @staticmethod
-    def _analyze_band_position(prices: np.ndarray) -> dict[str, float]:
-        if len(prices) == 0:
-            return {
-                "above_mean_pct": 0.0,
-                "above_1sd_pct": 0.0,
-                "below_minus_1sd_pct": 0.0,
-                "within_1sd_pct": 0.0,
-            }
+    def _classify_regime(self, asset: str) -> tuple[str, float]:
+        indicators = getattr(self, "indicators", {})
 
-        p = prices.astype(float)
-        n = len(p)
-        idx = np.arange(1, n + 1, dtype=float)
+        band_df = indicators.get("band_position")
+        if band_df is not None and asset in band_df.columns:
+            col = band_df[asset]
+            above_mean = float(col["above_mean_pct"])
+            above_1sd = float(col["above_1sd_pct"])
+            below_1sd = float(col["below_minus_1sd_pct"])
+            within = float(col["within_1sd_pct"])
+        else:
+            above_mean = above_1sd = below_1sd = within = 0.0
 
-        csum = np.cumsum(p)
-        csum_sq = np.cumsum(p * p)
-        m = csum / idx
-        var = np.maximum(csum_sq / idx - m * m, 0.0)
-        s = np.sqrt(var)
-        up1 = m + s
-        down1 = m - s
-
-        n = len(p)
-        return {
-            "above_mean_pct": float((p > m).sum() / n * 100.0),
-            "above_1sd_pct": float((p > up1).sum() / n * 100.0),
-            "below_minus_1sd_pct": float((p < down1).sum() / n * 100.0),
-            "within_1sd_pct": float(((p >= down1) & (p <= up1)).sum() / n * 100.0),
-        }
-
-    def _detect_mean_reversion(self, prices: np.ndarray) -> float:
-        window = self.mean_reversion_window
-        if len(prices) < window:
-            return 0.0
-
-        roll = pd.Series(prices).rolling(window=window, min_periods=1).mean().values
-        dev = prices - roll
-        valid = dev[~np.isnan(dev)]
-        if len(valid) <= 1:
-            return 0.0
-
-        changes = np.sum(np.diff(np.sign(valid)) != 0)
-        return float(np.clip(changes / (len(valid) - 1), 0.0, 1.0))
-
-    def _classify_regime(self, prices: np.ndarray) -> tuple[str, float]:
-        pos = self._analyze_band_position(prices)
-        mean_rev = self._detect_mean_reversion(prices)
-        above_mean = pos["above_mean_pct"]
-        above_1sd = pos["above_1sd_pct"]
-        below_1sd = pos["below_minus_1sd_pct"]
-        within = pos["within_1sd_pct"]
+        mr_series = indicators.get("mean_reversion")
+        mean_rev = float(mr_series.get(asset, 0.0)) if mr_series is not None else 0.0
 
         if (
             above_mean > self.imbalance_above_mean_threshold
@@ -284,90 +283,6 @@ class WeatherMarketImbalanceStrategy(Strategy):
             return "Balanced", within / 100.0
 
         return "Rotational", 0.5
-
-    def _transform_slope(self, raw_slope: float) -> float:
-        if self.vwap_slope_mode == "raw":
-            return float(raw_slope)
-
-        value_per_point = self.vwap_slope_value_per_point
-        if value_per_point == 0:
-            value_per_point = 1.0
-        normalized = float(raw_slope / value_per_point)
-
-        if self.vwap_slope_mode == "scaled":
-            return float(normalized * self.vwap_slope_scale)
-        if self.vwap_slope_mode == "angle":
-            angle_deg = float(np.degrees(np.arctan(normalized)))
-            return float(angle_deg * self.vwap_slope_scale)
-        raise ValueError(f"Unsupported vwap_slope_mode={self.vwap_slope_mode!r}")
-
-    def _vwap_slope_raw(self, asset: str, current_day: int) -> float:
-        if self.vwap is None or asset not in self.vwap.columns:
-            return 0.0
-
-        start = max(0, current_day - self.vwap_slope_lookback + 1)
-        vwap_series = self.vwap.iloc[start: current_day + 1][asset]
-        bar_offsets = np.arange(start, current_day + 1, dtype=float)
-
-        # Only use bars with real trading activity when volume is available.
-        if self.volume is not None and asset in self.volume.columns:
-            vol_series = self.volume.iloc[start: current_day + 1][asset]
-            valid_mask = (vol_series.fillna(0.0) > 0.0) & vwap_series.notna()
-            series = vwap_series[valid_mask]
-            x = bar_offsets[valid_mask.to_numpy(dtype=bool)]
-        else:
-            series = vwap_series.dropna()
-            valid_mask = vwap_series.notna()
-            x = bar_offsets[valid_mask.to_numpy(dtype=bool)]
-
-        if len(series) < 2:
-            return 0.0
-
-        y = series.to_numpy(dtype=float)
-        # Slope unit: VWAP change per original bar (not per valid-update step).
-        x = x - x[0]
-        slope = np.polyfit(x, y, 1)[0]
-        return float(slope)
-
-    def _vwap_slope(self, asset: str, current_day: int) -> float:
-        raw_slope = self._vwap_slope_raw(asset, current_day)
-        return self._transform_slope(raw_slope)
-
-    def _vwap_volume_imbalance_pct(
-        self,
-        prices: pd.DataFrame,
-        asset: str,
-        current_day: int,
-    ) -> float:
-        if (
-            self.vwap is None
-            or self.volume is None
-            or asset not in self.vwap.columns
-            or asset not in self.volume.columns
-            or asset not in prices.columns
-        ):
-            return float("nan")
-
-        price_hist = prices.iloc[: current_day + 1][asset]
-        vwap_hist = self.vwap.iloc[: current_day + 1][asset]
-        vol_hist = self.volume.iloc[: current_day + 1][asset].fillna(0.0)
-
-        valid_mask = vwap_hist.notna() & (vol_hist > 0.0)
-        vol_above = vol_hist.where(valid_mask & (price_hist > vwap_hist), 0.0)
-        vol_below = vol_hist.where(valid_mask & (price_hist < vwap_hist), 0.0)
-
-        roll_window = max(3, int(self.vwap_slope_lookback))
-        roll_above = vol_above.rolling(window=roll_window, min_periods=1).sum()
-        roll_below = vol_below.rolling(window=roll_window, min_periods=1).sum()
-        total_vol = roll_above + roll_below
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ratio_pct = (roll_above - roll_below).divide(total_vol.where(total_vol > 0.0)) * 100.0
-
-        try:
-            val = float(ratio_pct.iloc[-1])
-        except Exception:
-            val = float("nan")
-        return val
 
     @staticmethod
     def _short_trade_return(entry_price: float, current_price: float) -> float:
@@ -513,21 +428,21 @@ class WeatherMarketImbalanceStrategy(Strategy):
             if len(asset_window) < max(2, self.lookback // 2):
                 continue
 
-            regime, confidence = self._classify_regime(asset_window)
+            regime, confidence = self._classify_regime(asset)
             if regime != self.entry_regime:
                 continue
 
             slope = 0.0
             raw_slope = 0.0
             if self.use_vwap_slope_filter:
-                raw_slope = self._vwap_slope_raw(asset, index)
-                slope = self._transform_slope(raw_slope)
+                slope = float(self.indicators["vwap_slope"].get(asset, 0.0))
+                raw_slope = float(self.indicators["vwap_slope_raw"].get(asset, 0.0))
                 if slope > self.max_vwap_slope:
                     continue
 
             imbalance_pct = float("nan")
             if self.use_vwap_volume_imbalance_filter:
-                imbalance_pct = self._vwap_volume_imbalance_pct(prices, asset, index)
+                imbalance_pct = float(self.indicators["vwap_volume_imbalance"].get(asset, float("nan")))
                 if np.isnan(imbalance_pct) or imbalance_pct > self.max_vwap_volume_imbalance_pct:
                     continue
 

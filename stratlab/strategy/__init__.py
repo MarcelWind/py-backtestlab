@@ -2,6 +2,7 @@
 
 from .allocation import optimize_sharpe_weights
 from .base import BuyAndHoldStrategy, Strategy, StrategySpec
+from .indicators import BandPosition, Indicator, MeanReversion, VwapSlope, VwapVolumeImbalance
 from .momentum import MomentumStrategy
 from .sharpe import SharpeStrategy
 from .signals import (

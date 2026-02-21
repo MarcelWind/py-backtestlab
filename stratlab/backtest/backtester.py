@@ -54,6 +54,7 @@ class Backtester:
             # Rebalance check
             days_since_start = i - lookback
             if days_since_start % self.rebalance_freq == 0:
+                self.strategy._compute_indicators(prices, returns, i)
                 current_weights = self.strategy.generate_weights(prices, returns, i)
 
             # Calculate portfolio return for this day

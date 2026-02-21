@@ -1,11 +1,16 @@
 """Base strategy class and protocol."""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from .indicators import Indicator
 
 
 class Strategy(ABC):
@@ -14,9 +19,45 @@ class Strategy(ABC):
 
     Strategies define how to allocate weights across assets.
     The backtester calls generate_weights() at each rebalance point.
+
+    Indicator system
+    ----------------
+    Subclasses may declare a list of Indicator instances as ``indicator_defs``.
+    The backtester calls ``_compute_indicators()`` before each ``generate_weights``
+    call, storing results in ``self.indicators`` keyed by indicator name.
+
+    Example::
+
+        class MyStrategy(Strategy):
+            indicator_defs = [
+                VwapSlope(vwap=vwap_df, lookback=30),
+                BandPosition(lookback_hours=6.0),
+            ]
+
+            def generate_weights(self, prices, returns, index):
+                slope = self.indicators["vwap_slope"]  # pd.Series per asset
+                bands = self.indicators["band_position"]  # pd.DataFrame (stats x assets)
     """
 
     lookback: int  # Required lookback period for the strategy
+
+    # Subclasses may override with a list of Indicator instances.
+    indicator_defs: list[Indicator] = []
+
+    # Populated before each generate_weights call by _compute_indicators().
+    indicators: dict[str, Any]
+
+    def _compute_indicators(
+        self,
+        prices: pd.DataFrame,
+        returns: pd.DataFrame,
+        index: int,
+    ) -> None:
+        """Pre-compute all declared indicators and store results in ``self.indicators``."""
+        result: dict[str, Any] = {}
+        for ind in self.indicator_defs:
+            result[ind.name] = ind.compute(prices, returns, index)
+        self.indicators = result
 
     @abstractmethod
     def generate_weights(
