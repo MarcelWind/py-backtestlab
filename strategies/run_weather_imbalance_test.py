@@ -32,7 +32,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--event-slug",
-        default="highest-temperature-in-nyc-on-february-20-2026",
+        default="highest-temperature-in-atlanta-on-february-20-2026",
         help="Event slug to test",
     )
     parser.add_argument(

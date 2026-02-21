@@ -133,14 +133,13 @@ def plot_entries_exits(
 
     cols = 2
     rows = (len(markets) + cols - 1) // cols
-    # Add panels for two buy-volume rows plus volume and imbalance percent.
-    # We now use 7 panels per market: price, buy_no, buy_yes, instant vol, vol_imbalance, slope, meanrev
+    # 6 panels per market: price, buy delta (yes−no), sell delta (yes−no), vol_imbalance, slope, meanrev
     fig, axes = plt.subplots(
-        rows * 7,
+        rows * 6,
         cols,
         figsize=(16, 13 * rows),
         sharex="col",
-        gridspec_kw={"height_ratios": [3, 0.9, 0.9, 1.0, 0.9, 1.2, 1.2] * rows},
+        gridspec_kw={"height_ratios": [3, 2.0, 2.0, 0.9, 1.2, 1.2] * rows},
     )
 
     if isinstance(axes, np.ndarray):
@@ -275,13 +274,12 @@ def plot_entries_exits(
     for idx, market in enumerate(markets):
         grid_row = idx // cols
         grid_col = idx % cols
-        ax = axes[grid_row * 7, grid_col]
-        ax_buy_no = axes[grid_row * 7 + 1, grid_col]
-        ax_buy_yes = axes[grid_row * 7 + 2, grid_col]
-        ax_vol = axes[grid_row * 7 + 3, grid_col]
-        ax_vol_ratio = axes[grid_row * 7 + 4, grid_col]
-        ax_slope = axes[grid_row * 7 + 5, grid_col]
-        ax_meanrev = axes[grid_row * 7 + 6, grid_col]
+        ax = axes[grid_row * 6, grid_col]
+        ax_vol = axes[grid_row * 6 + 1, grid_col]
+        ax_sell_vol = axes[grid_row * 6 + 2, grid_col]
+        ax_vol_ratio = axes[grid_row * 6 + 3, grid_col]
+        ax_slope = axes[grid_row * 6 + 4, grid_col]
+        ax_meanrev = axes[grid_row * 6 + 5, grid_col]
 
         series = prices[market].dropna()
         # Human-friendly display name: strip __yes/__no suffix for titles
@@ -430,8 +428,7 @@ def plot_entries_exits(
         else:
             ax_vol.set_visible(False)
 
-        # New panels: buy volume for no outcome and buy volume for yes outcome
-        # Determine base market name (strip __yes/__no if present)
+        # Determine base market name for buy-vol column lookup (strip __yes/__no if present)
         m_match = suffix_re.match(str(market))
         base_name = m_match.group(1) if m_match else str(market)
 
@@ -477,34 +474,6 @@ def plot_entries_exits(
 
         no_col, yes_col = _select_buy_cols(buy_volume, base_name, str(market))
 
-        # --- buy vol (no) panel ---
-        plotted_buy_no = False
-        if buy_volume is not None and no_col is not None:
-            no_ser = buy_volume[no_col].reindex(series.index).fillna(0.0)
-            ax_buy_no.bar(no_ser.index, no_ser.values, width=bar_width_days, color="#8B0000", alpha=0.6, align="center", edgecolor="none")
-            ax_buy_no.set_title("buy vol (no)", fontsize=7, loc="left", pad=2)
-            ax_buy_no.tick_params(axis="x", rotation=45, labelsize=7)
-            ax_buy_no.tick_params(axis="y", labelsize=7)
-            ax_buy_no.grid(alpha=0.18)
-            ax_buy_no.set_xlim(ax.get_xlim())
-            plotted_buy_no = True
-        if not plotted_buy_no:
-            ax_buy_no.set_visible(False)
-
-        # --- buy vol (yes) panel ---
-        plotted_buy_yes = False
-        if buy_volume is not None and yes_col is not None:
-            yes_ser = buy_volume[yes_col].reindex(series.index).fillna(0.0)
-            ax_buy_yes.bar(yes_ser.index, yes_ser.values, width=bar_width_days, color="#006400", alpha=0.6, align="center", edgecolor="none")
-            ax_buy_yes.set_title("buy vol (yes)", fontsize=7, loc="left", pad=2)
-            ax_buy_yes.tick_params(axis="x", rotation=45, labelsize=7)
-            ax_buy_yes.tick_params(axis="y", labelsize=7)
-            ax_buy_yes.grid(alpha=0.18)
-            ax_buy_yes.set_xlim(ax.get_xlim())
-            plotted_buy_yes = True
-        if not plotted_buy_yes:
-            ax_buy_yes.set_visible(False)
-
         # --- buy vol yes−no delta panel (ax_vol) ---
         plotted_vol = False
         if buy_volume is not None and yes_col is not None and no_col is not None:
@@ -513,16 +482,90 @@ def plot_entries_exits(
             delta_yn = yes_ser_v - no_ser_v
             colors_yn = ["#006400" if v >= 0 else "#8B0000" for v in delta_yn.values]
             ax_vol.bar(delta_yn.index, delta_yn.values, width=bar_width_days, color=colors_yn, alpha=0.75, align="center", edgecolor="none")
-            ax_vol.set_title("buy vol Δ (yes − no)", fontsize=7, loc="left", pad=2)
+            ax_vol.set_title("buy vol Δ (yes − no)  |  line = cumulative Δ", fontsize=7, loc="left", pad=2)
             ax_vol.tick_params(axis="x", rotation=45, labelsize=7)
             ax_vol.tick_params(axis="y", labelsize=7)
             ax_vol.grid(alpha=0.18)
             ax_vol.axhline(0.0, color="#888888", linestyle="-", linewidth=0.8, alpha=0.6, zorder=1)
             ax_vol.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m %H:%M'))
             ax_vol.set_xlim(ax.get_xlim())
+            # Area labels: positive = YES buys, negative = NO buys
+            ax_vol.text(
+                0.01, 0.97, "▲ YES buys",
+                transform=ax_vol.transAxes, fontsize=7, va="top", ha="left",
+                color="#006400", alpha=0.85,
+            )
+            ax_vol.text(
+                0.01, 0.03, "▼ NO buys",
+                transform=ax_vol.transAxes, fontsize=7, va="bottom", ha="left",
+                color="#8B0000", alpha=0.85,
+            )
+            # Cumulative delta line on a twin axis — anchored to 0 at the first bar
+            cum_delta = delta_yn.cumsum()
+            if len(cum_delta) > 0:
+                cum_delta = cum_delta - cum_delta.iloc[0]
+            ax_vol_cum = ax_vol.twinx()
+            ax_vol_cum.plot(
+                cum_delta.index,
+                cum_delta.values,
+                color="#00008B",
+                linewidth=1.4,
+                alpha=0.85,
+                zorder=5,
+            )
+            ax_vol_cum.axhline(0.0, color="#00008B", linestyle=":", linewidth=0.7, alpha=0.4, zorder=1)
+            ax_vol_cum.tick_params(axis="y", labelsize=7, labelcolor="#00008B")
+            ax_vol_cum.set_ylabel("cum Δ", fontsize=7, color="#00008B")
             plotted_vol = True
         if not plotted_vol:
             ax_vol.set_visible(False)
+
+        # --- sell vol yes−no delta panel (ax_sell_vol) ---
+        sell_no_col, sell_yes_col = _select_buy_cols(sell_volume, base_name, str(market))
+        plotted_sell_vol = False
+        if sell_volume is not None and sell_yes_col is not None and sell_no_col is not None:
+            sell_yes_ser = sell_volume[sell_yes_col].reindex(series.index).fillna(0.0)
+            sell_no_ser = sell_volume[sell_no_col].reindex(series.index).fillna(0.0)
+            sell_delta = sell_yes_ser - sell_no_ser
+            sell_colors = ["#006400" if v >= 0 else "#8B0000" for v in sell_delta.values]
+            ax_sell_vol.bar(sell_delta.index, sell_delta.values, width=bar_width_days, color=sell_colors, alpha=0.75, align="center", edgecolor="none")
+            ax_sell_vol.set_title("sell vol Δ (yes − no)  |  line = cumulative Δ", fontsize=7, loc="left", pad=2)
+            ax_sell_vol.tick_params(axis="x", rotation=45, labelsize=7)
+            ax_sell_vol.tick_params(axis="y", labelsize=7)
+            ax_sell_vol.grid(alpha=0.18)
+            ax_sell_vol.axhline(0.0, color="#888888", linestyle="-", linewidth=0.8, alpha=0.6, zorder=1)
+            ax_sell_vol.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m %H:%M'))
+            ax_sell_vol.set_xlim(ax.get_xlim())
+            # Area labels
+            ax_sell_vol.text(
+                0.01, 0.97, "▲ YES sells",
+                transform=ax_sell_vol.transAxes, fontsize=7, va="top", ha="left",
+                color="#006400", alpha=0.85,
+            )
+            ax_sell_vol.text(
+                0.01, 0.03, "▼ NO sells",
+                transform=ax_sell_vol.transAxes, fontsize=7, va="bottom", ha="left",
+                color="#8B0000", alpha=0.85,
+            )
+            # Cumulative sell delta on twin axis — anchored to 0 at the first bar
+            sell_cum_delta = sell_delta.cumsum()
+            if len(sell_cum_delta) > 0:
+                sell_cum_delta = sell_cum_delta - sell_cum_delta.iloc[0]
+            ax_sell_cum = ax_sell_vol.twinx()
+            ax_sell_cum.plot(
+                sell_cum_delta.index,
+                sell_cum_delta.values,
+                color="#4B0082",
+                linewidth=1.4,
+                alpha=0.85,
+                zorder=5,
+            )
+            ax_sell_cum.axhline(0.0, color="#4B0082", linestyle=":", linewidth=0.7, alpha=0.4, zorder=1)
+            ax_sell_cum.tick_params(axis="y", labelsize=7, labelcolor="#4B0082")
+            ax_sell_cum.set_ylabel("cum Δ", fontsize=7, color="#4B0082")
+            plotted_sell_vol = True
+        if not plotted_sell_vol:
+            ax_sell_vol.set_visible(False)
 
         # Volume imbalance percent panel
         if vwap is not None and market in vwap.columns and vol_for_profile is not None:
@@ -665,13 +708,12 @@ def plot_entries_exits(
     for i in range(len(markets), total_slots):
         grid_row = i // cols
         grid_col = i % cols
-        axes[grid_row * 7, grid_col].set_visible(False)
-        axes[grid_row * 7 + 1, grid_col].set_visible(False)
-        axes[grid_row * 7 + 2, grid_col].set_visible(False)
-        axes[grid_row * 7 + 3, grid_col].set_visible(False)
-        axes[grid_row * 7 + 4, grid_col].set_visible(False)
-        axes[grid_row * 7 + 5, grid_col].set_visible(False)
-        axes[grid_row * 7 + 6, grid_col].set_visible(False)
+        axes[grid_row * 6, grid_col].set_visible(False)
+        axes[grid_row * 6 + 1, grid_col].set_visible(False)
+        axes[grid_row * 6 + 2, grid_col].set_visible(False)
+        axes[grid_row * 6 + 3, grid_col].set_visible(False)
+        axes[grid_row * 6 + 4, grid_col].set_visible(False)
+        axes[grid_row * 6 + 5, grid_col].set_visible(False)
 
     handles = [
         Line2D([0], [0], marker="v", color="w", markerfacecolor="#8B0000", markersize=7, label="Short Entry"),
@@ -684,6 +726,10 @@ def plot_entries_exits(
         handles.append(Line2D([0], [0], color=WINDOW_COLORS.get(wh, "gray"), lw=3, label=f"T-{wh}h"))
     # Anchored mean volume line
     handles.append(Line2D([0], [0], color="#00008B", lw=1.6, linestyle="--", label="Anchored mean vol"))
+    # Cumulative buy-vol delta
+    handles.append(Line2D([0], [0], color="#00008B", lw=1.4, label="Cum buy Δ (yes−no)"))
+    # Cumulative sell-vol delta
+    handles.append(Line2D([0], [0], color="#4B0082", lw=1.4, label="Cum sell Δ (yes−no)"))
 
     fig.legend(
         handles=handles,
