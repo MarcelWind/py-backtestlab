@@ -411,6 +411,7 @@ def plot_entries_exits(
     volume: pd.DataFrame | None = None,
     buy_volume: pd.DataFrame | None = None,
     sell_volume: pd.DataFrame | None = None,
+    indicator_series: dict[str, pd.DataFrame] | None = None,
     indicator_defs: list | None = None,
     # Legacy fallback params — used only when indicator_defs is None:
     vwap_slope_mode: str = "raw",
@@ -524,15 +525,21 @@ def plot_entries_exits(
     _returns = prices.pct_change()
 
     slope_ind: VwapSlope | None = ind_map.get("vwap_slope")  # type: ignore[assignment]
-    slope_df = slope_ind.compute_series(prices, _returns) if slope_ind is not None else None
-    imbalance_df = (
-        ind_map["vwap_volume_imbalance"].compute_series(prices, _returns)
-        if "vwap_volume_imbalance" in ind_map else None
-    )
-    mr_df = (
-        ind_map["mean_reversion"].compute_series(prices, _returns)
-        if "mean_reversion" in ind_map else None
-    )
+
+    if indicator_series is not None:
+        slope_df     = indicator_series.get("vwap_slope")
+        imbalance_df = indicator_series.get("vwap_volume_imbalance")
+        mr_df        = indicator_series.get("mean_reversion")
+    else:
+        slope_df = slope_ind.compute_series(prices, _returns) if slope_ind is not None else None
+        imbalance_df = (
+            ind_map["vwap_volume_imbalance"].compute_series(prices, _returns)
+            if "vwap_volume_imbalance" in ind_map else None
+        )
+        mr_df = (
+            ind_map["mean_reversion"].compute_series(prices, _returns)
+            if "mean_reversion" in ind_map else None
+        )
 
     for idx, market in enumerate(markets):
         grid_row = idx // cols

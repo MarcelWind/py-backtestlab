@@ -54,10 +54,32 @@ class Strategy(ABC):
         index: int,
     ) -> None:
         """Pre-compute all declared indicators and store results in ``self.indicators``."""
+        if not hasattr(self, "_ind_acc"):
+            self._ind_acc: dict[str, list[tuple]] = {}
         result: dict[str, Any] = {}
         for ind in self.indicator_defs:
-            result[ind.name] = ind.compute(prices, returns, index)
+            val = ind.compute(prices, returns, index)
+            result[ind.name] = val
+            if isinstance(val, pd.Series):
+                self._ind_acc.setdefault(ind.name, []).append((prices.index[index], val))
         self.indicators = result
+
+    @property
+    def indicator_series(self) -> dict[str, pd.DataFrame]:
+        """Per-bar indicator history accumulated during the backtest run.
+
+        Returns a dict mapping indicator name to a DataFrame of shape
+        (n_rebalance_bars, n_assets).  Only indicators whose ``compute()``
+        returns a ``pd.Series`` are included (e.g. VwapSlope, VwapVolumeImbalance,
+        MeanReversion). DataFrame-returning indicators (e.g. BandPosition) are
+        excluded.
+        """
+        acc = getattr(self, "_ind_acc", {})
+        return {
+            name: pd.DataFrame([r[1] for r in rows], index=[r[0] for r in rows])
+            for name, rows in acc.items()
+            if rows
+        }
 
     @abstractmethod
     def generate_weights(

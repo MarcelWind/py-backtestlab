@@ -993,7 +993,7 @@ def draw_price_sd_volume_panel(
     ax.plot(bands["timestamp"], bands["price"], color="#A9C4FF", linewidth=1.2, alpha=0.95, zorder=3)
 
     if vwap_s is not None and len(vwap_s.dropna()) > 0:
-        vwap_clean = vwap_s.reindex(series.index)
+        vwap_clean = vwap_s#.reindex(series.index)
         ax.plot(vwap_clean.index, vwap_clean.values, color="#FFA500", linewidth=1.0,
                 alpha=0.8, linestyle="-", zorder=4, label="VWAP")
 
@@ -1075,7 +1075,7 @@ def draw_regime_overlays(
         ax.plot(
             sub["timestamp"], sub["price"],
             color=window_colors.get(wh, "gray"),
-            linewidth=2.0, alpha=0.95, zorder=6,
+            linewidth=1.3, alpha=0.95, zorder=6,
         )
 
     # Normalize timestamps for compute_window_regime_summary (strip tz)
