@@ -7,10 +7,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
+from stratlab.strategy.indicators import sd_bands_rolling
+from stratlab.strategy.indicators import market_regimes as _classify_regime_from_stats
 
-# -------------------------
-# Data standardization
-# -------------------------
+
 def _standardize_df(df, inferred_market=None):
     df = df.copy()
     ts_cols = [c for c in df.columns if c.lower() in ("timestamp", "time", "date", "datetime")]
@@ -29,34 +29,35 @@ def _standardize_df(df, inferred_market=None):
 
 
 # -------------------------
-# Rolling SD bands
+# Rolling SD bands wrapper (imports from stratlab)
 # -------------------------
 def rolling_sd_bands(df_market):
+    """
+    Compute rolling SD bands for market data.
+    
+    Wrapper around stratlab.strategy.indicators.compute_rolling_sd_bands()
+    that maintains backward compatibility with the original API.
+    
+    Args:
+        df_market: DataFrame with 'price' and 'timestamp' columns
+        
+    Returns:
+        DataFrame with timestamp, price, mean, ±1sd, ±2sd, ±3sd columns
+    """
     prices = df_market["price"].values
     timestamps = df_market["timestamp"].values
-    rows = []
-    for i in range(len(prices)):
-        hist = prices[: i + 1]
-        m = hist.mean()
-        s = hist.std(ddof=0)
-        rows.append(
-            {
-                "timestamp": timestamps[i],
-                "price": prices[i],
-                "mean": m,
-                "+1sd": m + s,
-                "-1sd": m - s,
-                "+2sd": m + 2 * s,
-                "-2sd": m - 2 * s,
-                "+3sd": m + 3 * s,
-                "-3sd": m - 3 * s,
-            }
-        )
-    return pd.DataFrame(rows)
+    bands = sd_bands_rolling(prices, timestamps)
+    # Add back price column and timestamp
+    bands = bands.copy()
+    bands["price"] = prices
+    bands["timestamp"] = timestamps
+    # Reorder columns for convenience
+    cols = ["timestamp", "price", "mean", "-3sd", "-2sd", "-1sd", "+1sd", "+2sd", "+3sd"]
+    return bands[[c for c in cols if c in bands.columns]]
 
 
 # -------------------------
-# Simple metrics & regime rules
+# Data standardization
 # -------------------------
 def analyze_band_position(bands_df):
     if bands_df.empty:
@@ -137,46 +138,33 @@ def detect_mean_reversion_against_full(sub_df, bands_full, window=5):
 
 
 def classify_regime(bands_df):
+    """
+    Classify market regime using cumulative band position and mean reversion.
+    
+    Dispatches to stratlab.strategy.indicators.classify_regime() with band stats
+    and mean reversion score computed from the DataFrame.
+    
+    Args:
+        bands_df: DataFrame with 'price', 'mean', '+1sd', '-1sd' columns (from rolling_sd_bands)
+        
+    Returns:
+        Tuple of (regime_label, confidence_score)
+    """
     pos = analyze_band_position(bands_df)
     mean_rev = detect_mean_reversion(bands_df["price"].values)
-    above_mean = pos["above_mean_pct"]
-    above_1sd = pos["above_1sd_pct"]
-    below_1sd = pos["below_minus_1sd_pct"]
-    within = pos["within_1sd_pct"]
-
-    # Priority rules (simple and interpretable)
-    if above_mean > 60 and above_1sd > 40:
-        return "Imb. Up", min(1.0, (above_mean - 50) / 50 + above_1sd / 100.0)
-    if below_1sd > 40 and above_mean < 40:
-        return "Imb. Down", min(1.0, (40 - above_mean) / 50 + below_1sd / 100.0)
-    if mean_rev >= 0.5:
-        return "Mean-Reverting", mean_rev
-    if within >= 70:
-        return "Balanced", within / 100.0
-    return "Rotational", 0.5
+    return _classify_regime_from_stats(pos, mean_rev)
 
 
 def classify_regime_against_full(sub_df, bands_full):
     """
     Classify sub_df regime but measure position vs full-history bands and
     mean-reversion vs the full-history mean (aligned).
+    
+    Uses stratlab.strategy.indicators.classify_regime() under the hood.
     """
     pos = analyze_band_position_against_reference(sub_df, bands_full)
     mean_rev = detect_mean_reversion_against_full(sub_df, bands_full)
-    above_mean = pos["above_mean_pct"]
-    above_1sd = pos["above_1sd_pct"]
-    below_1sd = pos["below_minus_1sd_pct"]
-    within = pos["within_1sd_pct"]
-
-    if above_mean > 60 and above_1sd > 40:
-        return "Imb. Up", min(1.0, (above_mean - 50) / 50 + above_1sd / 100.0)
-    if below_1sd > 40 and above_mean < 40:
-        return "Imb. Down", min(1.0, (40 - above_mean) / 50 + below_1sd / 100.0)
-    if mean_rev >= 0.5:
-        return "Mean-Reverting", mean_rev
-    if within >= 70:
-        return "Balanced", within / 100.0
-    return "Rotational", 0.5
+    return _classify_regime_from_stats(pos, mean_rev)
 
 
 # -------------------------

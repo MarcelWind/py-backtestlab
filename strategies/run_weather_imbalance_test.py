@@ -132,12 +132,8 @@ def main() -> None:
         # regardless of the strategy's `prefer_outcome` used for backtesting.
         buy_volume=buy_volume_full,
         sell_volume=sell_volume_full,
-        vwap_slope_mode=strategy.vwap_slope_mode,
-        vwap_slope_value_per_point=strategy.vwap_slope_value_per_point,
-        vwap_slope_scale=strategy.vwap_slope_scale,
-        vwap_slope_lookback=strategy.vwap_slope_lookback,
+        indicator_defs=strategy.indicator_defs,
         max_vwap_slope=strategy.max_vwap_slope,
-        mean_reversion_window=strategy.mean_reversion_window,
         mean_reversion_threshold=strategy.mean_reversion_threshold,
     )
 

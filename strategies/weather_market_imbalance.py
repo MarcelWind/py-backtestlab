@@ -82,8 +82,8 @@ PROFILE_PRESETS: dict[str, dict[str, object]] = {
 class WeatherMarketImbalanceStrategy(Strategy):
     """Short markets classified as imbalanced down in a rolling window.
 
-    The regime logic mirrors `market_regime_analysis.py` thresholds but is
-    evaluated on a rolling lookback window to be deployable in live trading.
+    The regime logic mirrors stratlab.strategy.indicators.classify_regime() thresholds
+    but is evaluated on a rolling lookback window to be deployable in live trading.
     """
 
     def __init__(

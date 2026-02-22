@@ -38,6 +38,15 @@ class Indicator(ABC):
         """Unique key used in the `indicators` dict."""
         ...
 
+    @property
+    def plot_panel(self) -> int | None:
+        """Subplot panel index for plotting (0 = price panel, None = skip).
+
+        Subclasses set ``self._plot_panel`` to control which panel this
+        indicator is drawn in when ``plot_market_indicators`` is called.
+        """
+        return getattr(self, "_plot_panel", None)
+
     @abstractmethod
     def compute(
         self,
@@ -57,6 +66,38 @@ class Indicator(ABC):
             or pd.DataFrame (per-asset multi-stat).
         """
         ...
+
+    def compute_series(
+        self,
+        prices: pd.DataFrame,
+        returns: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Compute indicator values for every bar and return as a DataFrame.
+
+        Default implementation iterates over all bar indices calling
+        ``compute()``.  The result must be a ``pd.Series`` at each bar;
+        raises ``TypeError`` otherwise (override this method for indicators
+        that return non-Series values, e.g. ``BandPosition``).
+
+        Args:
+            prices:  Full price DataFrame (rows=timestamps, cols=assets).
+            returns: Full returns DataFrame aligned to prices.
+
+        Returns:
+            DataFrame of shape ``(n_bars, n_assets)`` with the same index
+            as ``prices``.
+        """
+        result = []
+        for i in range(len(prices)):
+            val = self.compute(prices, returns, i)
+            if not isinstance(val, pd.Series):
+                raise TypeError(
+                    f"{self.__class__.__name__}.compute() returns "
+                    f"{type(val).__name__}, not pd.Series — "
+                    "override compute_series() or set plot_panel=None."
+                )
+            result.append(val)
+        return pd.DataFrame(result, index=prices.index)
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +182,7 @@ class VwapSlope(Indicator):
         value_per_point: float = 1e-4,
         scale: float = 1.0,
         name: str = "vwap_slope",
+        plot_panel: int | None = 2,
     ) -> None:
         self._vwap = vwap
         self._volume = volume
@@ -149,6 +191,7 @@ class VwapSlope(Indicator):
         self.value_per_point = float(value_per_point)
         self.scale = float(scale)
         self._indicator_name = name
+        self._plot_panel = plot_panel
 
     @property
     def name(self) -> str:
@@ -160,7 +203,8 @@ class VwapSlope(Indicator):
 
         start = max(0, index - self.lookback + 1)
         vwap_slice = self._vwap.iloc[start: index + 1][asset]
-        bar_offsets = np.arange(start, index + 1, dtype=float)
+        # bar_offsets must match vwap_slice length (vwap may be shorter than prices)
+        bar_offsets = np.arange(start, start + len(vwap_slice), dtype=float)
 
         if self._volume is not None and asset in self._volume.columns:
             vol_slice = self._volume.iloc[start: index + 1][asset]
@@ -212,11 +256,13 @@ class VwapVolumeImbalance(Indicator):
         volume: pd.DataFrame,
         lookback: int = 30,
         name: str = "vwap_volume_imbalance",
+        plot_panel: int | None = 1,
     ) -> None:
         self._vwap = vwap
         self._volume = volume
         self.lookback = int(lookback)
         self._indicator_name = name
+        self._plot_panel = plot_panel
 
     @property
     def name(self) -> str:
@@ -295,12 +341,14 @@ class BandPosition(Indicator):
         lookback_hours: float | None = None,
         lookback_bars: int | None = None,
         name: str = "band_position",
+        plot_panel: int | None = None,
     ) -> None:
         if lookback_hours is None and lookback_bars is None:
             raise ValueError("Provide at least one of lookback_hours or lookback_bars.")
         self.lookback_hours = lookback_hours
         self.lookback_bars = lookback_bars
         self._indicator_name = name
+        self._plot_panel = plot_panel
 
     @property
     def name(self) -> str:
@@ -380,6 +428,7 @@ class MeanReversion(Indicator):
         lookback_hours: float | None = None,
         lookback_bars: int | None = None,
         name: str = "mean_reversion",
+        plot_panel: int | None = 3,
     ) -> None:
         if lookback_hours is None and lookback_bars is None:
             raise ValueError("Provide at least one of lookback_hours or lookback_bars.")
@@ -387,6 +436,7 @@ class MeanReversion(Indicator):
         self.lookback_hours = lookback_hours
         self.lookback_bars = lookback_bars
         self._indicator_name = name
+        self._plot_panel = plot_panel
 
     @property
     def name(self) -> str:
@@ -420,3 +470,430 @@ class MeanReversion(Indicator):
             for asset in assets
         }
         return pd.Series(scores, dtype=float)
+
+# ---------------------------------------------------------------------------
+# Cumulative Band Analysis (Market Regime Analysis)
+# ---------------------------------------------------------------------------
+
+def sd_bands_rolling(
+    prices_series: np.ndarray | pd.Series,
+    timestamps: np.ndarray | pd.Index | None = None,
+) -> pd.DataFrame:
+    """
+    Compute cumulative rolling standard deviation bands for a single price series.
+
+    For each bar, computes mean and std of all historical prices up to that bar.
+    Returns a DataFrame with columns: mean, +1sd, -1sd, +2sd, -2sd, +3sd, -3sd.
+
+    Parameters
+    ----------
+    prices_series:
+        1D array of prices.
+    timestamps:
+        Optional timestamps for the index. If not provided, integer index is used.
+
+    Returns:
+        DataFrame with bands (one row per price point).
+    """
+    if isinstance(prices_series, pd.Series):
+        prices = prices_series.to_numpy(dtype=float)
+        idx = prices_series.index if timestamps is None else timestamps
+    else:
+        prices = np.asarray(prices_series, dtype=float)
+        idx = timestamps if timestamps is not None else np.arange(len(prices))
+
+    rows = []
+    for i in range(len(prices)):
+        hist = prices[: i + 1]
+        m = float(np.nanmean(hist))
+        s = float(np.nanstd(hist, ddof=0))
+        rows.append({
+            "mean": m,
+            "+1sd": m + s,
+            "-1sd": m - s,
+            "+2sd": m + 2 * s,
+            "-2sd": m - 2 * s,
+            "+3sd": m + 3 * s,
+            "-3sd": m - 3 * s,
+        })
+    return pd.DataFrame(rows, index=idx)
+
+
+def market_regimes(
+    band_position_stats: dict[str, float],
+    mean_reversion_score: float,
+    confidence_boost: float = 0.5,
+) -> tuple[str, float]:
+    """
+    Classify market regime based on band position and mean reversion metrics.
+
+    Uses priority rules:
+    1. Strong imbalance up (above mean >60%, above 1sd >40%)
+    2. Strong imbalance down (below -1sd >40%, above mean <40%)
+    3. High mean reversion (score >=0.5)
+    4. Balanced (within ±1sd >=70%)
+    5. Rotational (default)
+
+    Parameters
+    ----------
+    band_position_stats:
+        Dict with keys: "above_mean_pct", "above_1sd_pct", "below_minus_1sd_pct", "within_1sd_pct"
+    mean_reversion_score:
+        Oscillation score in [0, 1], where 1 = maximum mean reversion.
+    confidence_boost:
+        Scaling factor for confidence scores (0-1).
+
+    Returns:
+        Tuple of (regime_label, confidence_score).
+    """
+    above_mean = band_position_stats.get("above_mean_pct", 0.0)
+    above_1sd = band_position_stats.get("above_1sd_pct", 0.0)
+    below_1sd = band_position_stats.get("below_minus_1sd_pct", 0.0)
+    within = band_position_stats.get("within_1sd_pct", 0.0)
+
+    # Priority rules
+    if above_mean > 60 and above_1sd > 40:
+        conf = min(1.0, (above_mean - 50) / 50 + above_1sd / 100.0)
+        return "Imb. Up", conf
+    if below_1sd > 40 and above_mean < 40:
+        conf = min(1.0, (40 - above_mean) / 50 + below_1sd / 100.0)
+        return "Imb. Down", conf
+    if mean_reversion_score >= 0.5:
+        return "Mean-Reverting", mean_reversion_score
+    if within >= 70:
+        return "Balanced", within / 100.0
+    return "Rotational", 0.5
+
+
+# ---------------------------------------------------------------------------
+# Window-based Band Analysis (comparing windows against full-history reference)
+# ---------------------------------------------------------------------------
+
+def analyze_band_position_vs_reference(
+    window_prices: np.ndarray | pd.Series,
+    full_bands: pd.DataFrame,
+    window_timestamps: np.ndarray | pd.Index | None = None,
+) -> dict[str, float]:
+    """
+    Compute band position stats for a window against full-history band reference.
+    
+    Aligns window timestamps to full-history bands (nearest previous) and computes
+    what % of window prices fall above/below the reference bands.
+    
+    Parameters
+    ----------
+    window_prices:
+        Price series for the window (must have timestamps as index or separate arg).
+    full_bands:
+        Full-history bands DataFrame from sd_bands_rolling() with band statistics.
+        Can have 'timestamp' column or timestamps in index.
+    window_timestamps:
+        Optional explicit timestamps for window. If None, uses window_prices.index.
+    
+    Returns:
+        Dict with keys: above_mean_pct, above_1sd_pct, below_minus_1sd_pct, within_1sd_pct
+    """
+    if isinstance(window_prices, pd.Series):
+        if window_timestamps is None:
+            window_timestamps = window_prices.index
+        prices_arr = window_prices.values
+    else:
+        prices_arr = np.asarray(window_prices, dtype=float)
+    
+    if len(prices_arr) == 0 or full_bands.empty:
+        return {
+            "above_mean_pct": 0.0,
+            "above_1sd_pct": 0.0,
+            "below_minus_1sd_pct": 0.0,
+            "within_1sd_pct": 0.0,
+        }
+    
+    # Build window DataFrame
+    window_df = pd.DataFrame({
+        "timestamp": window_timestamps,
+        "price": prices_arr,
+    })
+    
+    # Prepare reference bands - convert index to column if needed
+    ref = full_bands.copy()
+    if "timestamp" not in ref.columns:
+        ref = ref.reset_index()
+        if ref.columns[0] != "timestamp":
+            ref = ref.rename(columns={ref.columns[0]: "timestamp"})
+    
+    # Ensure we have the needed columns
+    ref = ref[["timestamp", "mean", "+1sd", "-1sd"]].sort_values("timestamp")
+    window_df = window_df.sort_values("timestamp")
+    
+    # Align using nearest previous
+    aligned = pd.merge_asof(window_df, ref, on="timestamp", direction="backward")
+    aligned = aligned.dropna(subset=["price", "mean", "+1sd", "-1sd"])
+    
+    if aligned.empty:
+        return {
+            "above_mean_pct": 0.0,
+            "above_1sd_pct": 0.0,
+            "below_minus_1sd_pct": 0.0,
+            "within_1sd_pct": 0.0,
+        }
+    
+    p = np.asarray(aligned["price"].values, dtype=float)
+    m = np.asarray(aligned["mean"].values, dtype=float)
+    up1 = np.asarray(aligned["+1sd"].values, dtype=float)
+    dn1 = np.asarray(aligned["-1sd"].values, dtype=float)
+    n = len(p)
+    
+    return {
+        "above_mean_pct": float((p > m).sum() / n * 100.0),
+        "above_1sd_pct": float((p > up1).sum() / n * 100.0),
+        "below_minus_1sd_pct": float((p < dn1).sum() / n * 100.0),
+        "within_1sd_pct": float(((p >= dn1) & (p <= up1)).sum() / n * 100.0),
+    }
+
+
+def detect_mean_reversion_vs_reference(
+    window_prices: np.ndarray | pd.Series,
+    full_bands: pd.DataFrame,
+    window_timestamps: np.ndarray | pd.Index | None = None,
+    window: int = 5,
+) -> float:
+    """
+    Compute mean-reversion score for window using deviations from full-history mean.
+    
+    Aligns window timestamps to full-history bands and measures oscillation
+    around the full-history rolling mean.
+    
+    Parameters
+    ----------
+    window_prices:
+        Price series for the window.
+    full_bands:
+        Full-history bands DataFrame with band statistics.
+        Can have 'timestamp' column or timestamps in index.
+    window_timestamps:
+        Optional explicit timestamps for window.
+    window:
+        Rolling window for mean calculation (not currently used, kept for API).
+    
+    Returns:
+        Score in [0, 1] where 1 = maximum mean reversion.
+    """
+    if isinstance(window_prices, pd.Series):
+        if window_timestamps is None:
+            window_timestamps = window_prices.index
+        prices_arr = window_prices.values
+    else:
+        prices_arr = np.asarray(window_prices, dtype=float)
+    
+    if len(prices_arr) == 0 or full_bands.empty:
+        return 0.0
+    
+    window_df = pd.DataFrame({
+        "timestamp": window_timestamps,
+        "price": prices_arr,
+    })
+    
+    # Prepare reference bands - convert index to column if needed
+    ref = full_bands.copy()
+    if "timestamp" not in ref.columns:
+        ref = ref.reset_index()
+        if ref.columns[0] != "timestamp":
+            ref = ref.rename(columns={ref.columns[0]: "timestamp"})
+    
+    ref = ref[["timestamp", "mean"]].sort_values("timestamp")
+    window_df = window_df.sort_values("timestamp")
+    
+    aligned = pd.merge_asof(window_df, ref, on="timestamp", direction="backward").dropna(
+        subset=["price", "mean"]
+    )
+    
+    if len(aligned) < 2:
+        return 0.0
+    
+    dev = np.asarray(aligned["price"].values, dtype=float) - np.asarray(aligned["mean"].values, dtype=float)
+    valid = dev[~np.isnan(dev)]
+    if len(valid) <= 1:
+        return 0.0
+    changes = np.sum(np.diff(np.sign(valid)) != 0)
+    return float(np.clip(changes / (len(valid) - 1), 0.0, 1.0))
+
+
+class RegimeClassification(Indicator):
+    """
+    Classify market regime based on cumulative band position and mean reversion.
+
+    Returns a numeric score (0-1) representing regime strength/confidence.
+    Regimes are classified priority-based:
+    - Imbalance Up/Down: High imbalance + low mean reversion
+    - Mean-Reverting: High oscillation score
+    - Balanced: Within ±1σ > 70%
+    - Rotational: Default, moderate confidence
+
+    Parameters
+    ----------
+    band_position_threshold:
+        Pct threshold for classifying imbalance (default 60% above/below mean).
+    mean_reversion_threshold:
+        Score threshold for detecting mean reversion (default 0.5).
+    use_cumulative:
+        If True, compute band position cumulatively (all history).
+        If False, use rolling window over lookback_bars.
+    lookback_bars:
+        Rolling window size when use_cumulative=False.
+    """
+
+    def __init__(
+        self,
+        band_position_threshold: float = 0.6,
+        mean_reversion_threshold: float = 0.5,
+        use_cumulative: bool = True,
+        lookback_bars: int = 100,
+        name: str = "regime_classification",
+        plot_panel: int | None = None,
+    ) -> None:
+        self.band_position_threshold = float(band_position_threshold)
+        self.mean_reversion_threshold = float(mean_reversion_threshold)
+        self.use_cumulative = bool(use_cumulative)
+        self.lookback_bars = int(lookback_bars)
+        self._indicator_name = name
+        self._plot_panel = plot_panel
+
+    @property
+    def name(self) -> str:
+        return self._indicator_name
+
+    def _compute_band_position(
+        self,
+        prices: pd.Series,
+        bands: pd.DataFrame,
+        index: int,
+    ) -> dict[str, float]:
+        """Compute band position stats against cumulative or rolling bands."""
+        p_slice = prices.iloc[: index + 1]
+        bands_slice = bands.iloc[: index + 1]
+
+        if self.use_cumulative:
+            # Use all historical data
+            p = p_slice.to_numpy(dtype=float)
+            m = bands_slice["mean"].to_numpy(dtype=float)
+            up1 = bands_slice["+1sd"].to_numpy(dtype=float)
+            dn1 = bands_slice["-1sd"].to_numpy(dtype=float)
+        else:
+            # Use rolling window
+            start = max(0, index - self.lookback_bars + 1)
+            p = p_slice.iloc[start:].to_numpy(dtype=float)
+            m = bands_slice.iloc[start:]["mean"].to_numpy(dtype=float)
+            up1 = bands_slice.iloc[start:]["+1sd"].to_numpy(dtype=float)
+            dn1 = bands_slice.iloc[start:]["-1sd"].to_numpy(dtype=float)
+
+        n = len(p)
+        if n < 2:
+            return {
+                "above_mean_pct": 0.0,
+                "above_1sd_pct": 0.0,
+                "below_minus_1sd_pct": 0.0,
+                "within_1sd_pct": 0.0,
+            }
+
+        return {
+            "above_mean_pct": float((p > m).sum() / n * 100.0),
+            "above_1sd_pct": float((p > up1).sum() / n * 100.0),
+            "below_minus_1sd_pct": float((p < dn1).sum() / n * 100.0),
+            "within_1sd_pct": float(((p >= dn1) & (p <= up1)).sum() / n * 100.0),
+        }
+
+    def compute(
+        self,
+        prices: pd.DataFrame,
+        returns: pd.DataFrame,
+        index: int,
+    ) -> pd.Series:
+        """
+        Compute regime confidence scores for each asset.
+
+        Returns a pd.Series indexed by asset name with confidence values [0, 1].
+        """
+        assets = prices.columns.tolist()
+        scores = {}
+
+        for asset in assets:
+            # Compute bands for this asset
+            bands = sd_bands_rolling(prices[asset])
+
+            # Compute band position stats
+            band_stats = self._compute_band_position(
+                prices[asset],
+                bands,
+                index,
+            )
+
+            # Compute mean reversion for this asset
+            hist = prices[asset].iloc[: index + 1].dropna().to_numpy(dtype=float)
+            if self.use_cumulative:
+                window = max(2, len(hist) // 5)
+            else:
+                window = max(2, self.lookback_bars // 5)
+
+            mr_score = MeanReversion._score_for_window(hist, window)
+
+            # Classify regime and extract confidence
+            regime, confidence = market_regimes(band_stats, mr_score)
+            scores[asset] = confidence
+
+        return pd.Series(scores, dtype=float)
+
+
+# ---------------------------------------------------------------------------
+# Volume Analysis Utilities
+# ---------------------------------------------------------------------------
+
+def volume_profile(
+    price_series: "pd.Series | np.ndarray",
+    volume_series: "pd.Series | np.ndarray | None" = None,
+    bins: int = 24,
+) -> "tuple[np.ndarray, np.ndarray]":
+    """Compute a volume-weighted histogram of prices.
+
+    Parameters
+    ----------
+    price_series:
+        Price values (pd.Series or np.ndarray).
+    volume_series:
+        Volume values aligned to prices. If None, uniform weights are used.
+    bins:
+        Number of histogram bins (default 24).
+
+    Returns
+    -------
+    tuple of (bin_centers, histogram) where:
+    - bin_centers: centre price of each bin
+    - histogram: volume-weighted count in each bin
+    """
+    p = (price_series.to_numpy(dtype=float)
+         if isinstance(price_series, pd.Series)
+         else np.asarray(price_series, dtype=float))
+
+    if volume_series is None:
+        w = np.ones_like(p)
+    else:
+        w = (volume_series.to_numpy(dtype=float)
+             if isinstance(volume_series, pd.Series)
+             else np.asarray(volume_series, dtype=float))
+
+    valid = (~np.isnan(p)) & (~np.isnan(w)) & (w > 0.0)
+    if valid.sum() < 2:
+        return np.array([]), np.array([])
+
+    p_valid = p[valid]
+    w_valid = w[valid]
+    pmin = float(np.min(p_valid))
+    pmax = float(np.max(p_valid))
+
+    if pmin == pmax:
+        edges = np.array([pmin - 1e-6, pmax + 1e-6], dtype=float)
+    else:
+        edges = np.linspace(pmin, pmax, bins + 1)
+
+    hist, _ = np.histogram(p_valid, bins=edges, weights=w_valid)
+    centers = (edges[:-1] + edges[1:]) / 2.0
+    return centers, hist.astype(float)
