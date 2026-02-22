@@ -9,6 +9,13 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.figure import Figure
 
+from stratlab.strategy.indicators import (
+    analyze_band_position_vs_reference,
+    detect_mean_reversion_vs_reference,
+    market_regimes,
+    volume_profile,
+)
+
 
 def plot_backtest(
     results: dict,
@@ -661,12 +668,12 @@ def plot_market_indicators(
                 et = tr.get("entry_time")
                 xt = tr.get("exit_time")
                 ep = (
-                    float(prices.loc[et, market])
+                    float(prices[market][et])
                     if et is not None and et in prices.index
                     else None
                 )
                 xp = (
-                    float(prices.loc[xt, market])
+                    float(prices[market][xt])
                     if xt is not None and pd.notna(xt) and xt in prices.index
                     else None
                 )
@@ -736,7 +743,7 @@ def plot_market_indicators(
                             for _, tr in mkt_tr2.iterrows():
                                 et = tr.get("entry_time")
                                 if et is not None and et in series_df.index:
-                                    val = float(series_df.loc[et, market])
+                                    val = float(series_df[market][et])
                                     if not np.isnan(val):
                                         ax_i.scatter(
                                             et, val,
@@ -793,12 +800,6 @@ def compute_window_regime_summary(
     Returns:
         String like "T-24h:Imb. Up | T-12h:Balanced" or "no windows" if insufficient data.
     """
-    from stratlab.strategy.indicators import (
-        analyze_band_position_vs_reference,
-        detect_mean_reversion_vs_reference,
-        market_regimes,
-    )
-
     if window_hours is None:
         window_hours = {48: "T-48h", 24: "T-24h", 12: "T-12h", 6: "T-6h"}
 
@@ -806,9 +807,12 @@ def compute_window_regime_summary(
     if isinstance(price_series, pd.Series):
         if timestamps is None:
             timestamps = price_series.index
-        prices_arr = price_series.values
+        prices_arr = price_series.to_numpy(dtype=float)
     else:
         prices_arr = np.asarray(price_series, dtype=float)
+
+    if timestamps is None:
+        return "no windows"
 
     if len(prices_arr) == 0 or full_bands.empty:
         return "no windows"
@@ -903,7 +907,7 @@ def plot_price_with_regime_windows(
     if not isinstance(timestamps, (pd.DatetimeIndex, pd.Index)):
         timestamps = pd.DatetimeIndex(timestamps)
     if isinstance(prices, pd.Series):
-        prices = prices.values
+        prices = prices.to_numpy(dtype=float)
     else:
         prices = np.asarray(prices, dtype=float)
 
@@ -950,8 +954,6 @@ def plot_price_with_regime_windows(
 
         prev_hours = wh
 
-
-from stratlab.strategy.indicators import volume_profile  # noqa: F401 re-export
 
 
 # ---------------------------------------------------------------------------
@@ -1081,12 +1083,12 @@ def draw_regime_overlays(
     bands_local = bands.copy()
     for col in ("timestamp",):
         if col in mdf_local.columns:
-            mdf_local[col] = pd.to_datetime(mdf_local[col], utc=True).dt.tz_localize(None)
+            mdf_local[col] = pd.to_datetime(mdf_local[col], utc=True).dt.tz_convert(None)
         if col in bands_local.columns:
-            bands_local[col] = pd.to_datetime(bands_local[col], utc=True).dt.tz_localize(None)
+            bands_local[col] = pd.to_datetime(bands_local[col], utc=True).dt.tz_convert(None)
 
-    ts_arr = mdf_local["timestamp"].values
-    prices_arr = mdf_local["price"].values
+    ts_arr = mdf_local["timestamp"].to_numpy()
+    prices_arr = mdf_local["price"].to_numpy(dtype=float)
     window_labels = {wh: f"T-{wh}h" for wh in window_hours.keys()}
     return compute_window_regime_summary(prices_arr, bands_local, window_hours=window_labels, timestamps=ts_arr)
 
@@ -1094,8 +1096,8 @@ def draw_regime_overlays(
 def draw_volume_profile_inset(
     ax,
     series: pd.Series,
-    vol_s: "pd.Series | None",
-    inset_bounds: tuple = (-0.16, 0.0, 0.14, 1.0),
+    vol_s: pd.Series | None,
+    inset_bounds: tuple[float, float, float, float] = (-0.16, 0.0, 0.14, 1.0),
 ) -> None:
     """Draw a volume profile as a left-side inset on an existing axes.
 
@@ -1110,8 +1112,6 @@ def draw_volume_profile_inset(
     inset_bounds:
         (x0, y0, width, height) in axes-fraction coordinates for the inset.
     """
-    from stratlab.strategy.indicators import volume_profile
-
     vp_centers, vp_hist = volume_profile(series, vol_s)
     if len(vp_centers) == 0 or float(np.nanmax(vp_hist)) == 0.0:
         return
@@ -1172,8 +1172,8 @@ def draw_volume_imbalance_panel(
     ax,
     ratio_pct: pd.Series,
     entry_times=None,
-    entry_values: "np.ndarray | None" = None,
-    lookback_label: "int | str" = "?",
+    entry_values: np.ndarray | None = None,
+    lookback_label: int | str = "?",
 ) -> None:
     """Draw volume imbalance % panel.
 
@@ -1208,10 +1208,10 @@ def draw_vwap_slope_panel(
     ax,
     slope_series: pd.Series,
     entry_times=None,
-    entry_values: "np.ndarray | None" = None,
-    threshold: "float | None" = None,
+    entry_values: np.ndarray | None = None,
+    threshold: float | None = None,
     mode_label: str = "raw",
-    lookback_label: "int | str" = "?",
+    lookback_label: int | str = "?",
     update_pct: float = 0.0,
 ) -> None:
     """Draw VWAP slope panel with symlog y-axis.
@@ -1279,9 +1279,9 @@ def draw_mean_reversion_panel(
     ax,
     mr_score: pd.Series,
     entry_times=None,
-    entry_values: "np.ndarray | None" = None,
-    threshold: "float | None" = 0.5,
-    window_label: "int | str" = "?",
+    entry_values: np.ndarray | None = None,
+    threshold: float | None = 0.5,
+    window_label: int | str = "?",
 ) -> None:
     """Draw mean-reversion score panel.
 
