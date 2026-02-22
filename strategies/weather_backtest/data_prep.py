@@ -180,6 +180,7 @@ def _build_matrices(
     # Instantaneous bar VWAP from source column, volume-weighted over
     # duplicate timestamps for each market.
     vwaps = src_vwap_values.divide(volumes.where(volumes > 0.0))
+    vwaps = vwaps.where(vwaps > 0)  # pivot_table(aggfunc="sum") silently treats NaN src as 0
 
     min_rows = 10
     valid_cols = closes.notna().sum() >= min_rows
@@ -204,6 +205,7 @@ def _build_matrices(
     # Resampled VWAP = sum(vwap * volume) / sum(volume), still no forward-fill.
     weighted = (vwaps * volumes.reindex(vwaps.index).fillna(0.0)).resample(resample_rule).sum()
     vwaps = weighted.divide(volumes.where(volumes > 0.0))
+    vwaps = vwaps.where(vwaps > 0)  # mask 0-VWAP artifact (resample .sum() zero-fills NaN)
     vwaps = vwaps.reindex(columns=closes.columns)
 
     closes = closes.dropna(axis=0, how="any")
