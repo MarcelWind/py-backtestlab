@@ -940,6 +940,122 @@ class SdBands(Indicator):
         }
 
 
+class VwapBands(Indicator):
+    """Expanding mean/std band indicator computed from VWAP values.
+
+    Similar to SdBands, but computes bands using a referenced Vwap indicator's
+    output values instead of close prices. Maintains running sum/sum_sq/count
+    per asset for O(1) per-bar updates.
+    
+    Note: VwapBands should be added to indicator_defs AFTER the Vwap indicator
+    it references, to ensure Vwap values are computed first.
+    
+    Parameters
+    ----------
+    vwap_indicator : Vwap
+        Reference to a Vwap indicator instance. Bands are computed from its values.
+    """
+
+    @property
+    def name(self) -> str:
+        return "vwap_bands"
+
+    def __init__(self, vwap_indicator: Vwap) -> None:
+        self._vwap_indicator = vwap_indicator
+        self._sums: dict[str, float] = {}
+        self._sum_sqs: dict[str, float] = {}
+        self._counts: dict[str, int] = {}
+        self._history: dict[str, list[tuple]] = {}
+        self._ts_lists: dict[str, list] = {}
+        self._next_bar: int = -1
+
+    def _process_bar(self, prices: pd.DataFrame, i: int, vwap_values: pd.Series) -> None:
+        """Process one bar given VWAP values for that bar."""
+        ts = prices.index[i]
+        
+        for asset in prices.columns:
+            if asset not in vwap_values.index:
+                continue
+            try:
+                vwap_val = float(vwap_values.loc[asset])
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(vwap_val):
+                continue
+            
+            self._sums[asset] = self._sums.get(asset, 0.0) + vwap_val
+            self._sum_sqs[asset] = self._sum_sqs.get(asset, 0.0) + vwap_val * vwap_val
+            self._counts[asset] = self._counts.get(asset, 0) + 1
+            n = self._counts[asset]
+            mean = self._sums[asset] / n
+            var = max(self._sum_sqs[asset] / n - mean ** 2, 0.0)
+            s = float(np.sqrt(var))
+            band_s = pd.Series({
+                "mean": mean,
+                "+1sd": mean + s,   "-1sd": mean - s,
+                "+2sd": mean + 2*s, "-2sd": mean - 2*s,
+                "+3sd": mean + 3*s, "-3sd": mean - 3*s,
+            })
+            self._history.setdefault(asset, []).append((ts, band_s))
+            self._ts_lists.setdefault(asset, []).append(ts)
+
+    def compute(
+        self,
+        prices: pd.DataFrame,
+        returns: pd.DataFrame,
+        index: int,
+    ) -> pd.DataFrame:
+        """Return current band values as DataFrame with shape (7, n_assets).
+
+        Index rows: ``["mean", "+1sd", "-1sd", "+2sd", "-2sd", "+3sd", "-3sd"]``
+        Columns: asset names
+
+        On first call, processes all bars from 0 up to *index* (catch-up pass)
+        so that ``band_slice`` has full history from the start of the price series.
+        Subsequent calls process exactly one bar per invocation.
+        """
+        if self._next_bar < 0:
+            self._next_bar = 0
+        for i in range(self._next_bar, index + 1):
+            # Get VWAP values for this bar from the referenced indicator
+            vwap_result = self._vwap_indicator.compute(prices, returns, i)
+            self._process_bar(prices, i, vwap_result)
+        self._next_bar = index + 1
+        result = {a: self._history[a][-1][1] for a in prices.columns if a in self._history}
+        return pd.DataFrame(result)
+
+    def band_slice(self, asset: str, from_ts, to_ts) -> "pd.DataFrame | None":
+        """Return band history for *asset* between *from_ts* and *to_ts* inclusive.
+
+        Uses binary search for O(log n + w) lookup.
+        Returns ``None`` if no data is available for the requested range.
+        """
+        import bisect
+        ts_list = self._ts_lists.get(asset)
+        hist = self._history.get(asset)
+        if not ts_list or not hist:
+            return None
+        lo = bisect.bisect_left(ts_list, from_ts)
+        hi = bisect.bisect_right(ts_list, to_ts)
+        if lo >= hi:
+            return None
+        rows = hist[lo:hi]
+        return pd.DataFrame([r[1] for r in rows], index=[r[0] for r in rows])
+
+    @property
+    def band_series(self) -> dict[str, pd.DataFrame]:
+        """Full band history keyed by asset name.
+
+        Each value is a DataFrame of shape ``(n_bars, 7)`` indexed by timestamp,
+        with columns ``["mean", "+1sd", "-1sd", "+2sd", "-2sd", "+3sd", "-3sd"]``.
+        """
+        return {
+            asset: pd.DataFrame([r[1] for r in rows], index=[r[0] for r in rows])
+            for asset, rows in self._history.items()
+            if rows
+        }
+
+
 def market_regimes(
     band_position_stats: dict[str, float],
     mean_reversion_score: float,
