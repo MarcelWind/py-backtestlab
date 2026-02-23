@@ -51,7 +51,7 @@ def replot_backtest(
     Parameters
     ----------
     event_slug:
-        Event slug (e.g. "highest-temperature-in-atlanta-on-february-20-2026")
+        Event slug (e.g. "highest-temperature-in-atlanta-on-february-22-2026")
     timestamp:
         Result timestamp (e.g. "20260223_155833"). If None, uses latest.
     resample_minutes:
@@ -189,7 +189,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--event-slug",
-        default="highest-temperature-in-atlanta-on-february-20-2026",
+        default="highest-temperature-in-atlanta-on-february-22-2026",
         help="Event slug to test",
     )
     parser.add_argument(

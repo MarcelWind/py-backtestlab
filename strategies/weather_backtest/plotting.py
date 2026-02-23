@@ -121,7 +121,11 @@ def _prepare_market_data(
     price_arr = mdf["price"].to_numpy(dtype=float)
     timestamps = mdf["timestamp"].to_numpy()
     if sdbands is not None and market in sdbands:
-        bands_full = sdbands[market].reindex(pd.to_datetime(series.index)).copy()
+        bands_df = sdbands[market].copy()
+        # Drop duplicate timestamps if they exist (keeping first occurrence)
+        if bands_df.index.duplicated().any():
+            bands_df = bands_df[~bands_df.index.duplicated(keep='first')]
+        bands_full = bands_df.reindex(pd.to_datetime(series.index)).copy()
     else:
         bands_full = sd_bands_rolling(price_arr, timestamps).copy()
     bands_full["price"] = price_arr
@@ -572,6 +576,13 @@ def plot_entries_exits(
     _returns = prices.pct_change()
 
     _sd_bands_ind = ind_map.get("sd_bands")
+    
+    # Compute SdBands indicator if it hasn't been computed yet
+    # (e.g., when using a freshly created strategy instance for replotting)
+    if _sd_bands_ind is not None:
+        for i in range(len(prices)):
+            _sd_bands_ind.compute(prices, _returns, i)
+    
     sdbands: dict[str, pd.DataFrame] | None = (
         _sd_bands_ind.band_series if _sd_bands_ind is not None else None  # type: ignore[union-attr]
     )

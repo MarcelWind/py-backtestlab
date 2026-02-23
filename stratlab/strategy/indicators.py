@@ -268,17 +268,23 @@ class Vwap(Indicator):
             open_ = None
             if self._high is not None and asset in self._high.columns:
                 try:
-                    high = float(self._high.iloc[i][asset])
+                    h = float(self._high.iloc[i][asset])
+                    if np.isfinite(h):
+                        high = h
                 except (TypeError, ValueError):
                     pass
             if self._low is not None and asset in self._low.columns:
                 try:
-                    low = float(self._low.iloc[i][asset])
+                    l = float(self._low.iloc[i][asset])
+                    if np.isfinite(l):
+                        low = l
                 except (TypeError, ValueError):
                     pass
             if self._open is not None and asset in self._open.columns:
                 try:
-                    open_ = float(self._open.iloc[i][asset])
+                    o = float(self._open.iloc[i][asset])
+                    if np.isfinite(o):
+                        open_ = o
                 except (TypeError, ValueError):
                     pass
             
@@ -852,17 +858,23 @@ class SdBands(Indicator):
             open_ = None
             if self._high is not None and asset in self._high.columns:
                 try:
-                    high = float(self._high.iloc[i][asset])
+                    h = float(self._high.iloc[i][asset])
+                    if np.isfinite(h):
+                        high = h
                 except (TypeError, ValueError):
                     pass
             if self._low is not None and asset in self._low.columns:
                 try:
-                    low = float(self._low.iloc[i][asset])
+                    l = float(self._low.iloc[i][asset])
+                    if np.isfinite(l):
+                        low = l
                 except (TypeError, ValueError):
                     pass
             if self._open is not None and asset in self._open.columns:
                 try:
-                    open_ = float(self._open.iloc[i][asset])
+                    o = float(self._open.iloc[i][asset])
+                    if np.isfinite(o):
+                        open_ = o
                 except (TypeError, ValueError):
                     pass
             
