@@ -6,6 +6,8 @@ from .indicators import (
     BandPosition,
     Indicator,
     MeanReversion,
+    SdBands,
+    Vwap,
     VwapSlope,
     VwapVolumeImbalance,
     RegimeClassification,

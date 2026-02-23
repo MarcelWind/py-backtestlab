@@ -3,7 +3,7 @@ import pandas as pd
 from typing import Any, cast
 
 from stratlab.strategy.base import Strategy
-from stratlab.strategy.indicators import BandPosition, MeanReversion, VwapSlope, VwapVolumeImbalance
+from stratlab.strategy.indicators import BandPosition, MeanReversion, SdBands, Vwap, VwapSlope, VwapVolumeImbalance
 
 
 PROFILE_PRESETS: dict[str, dict[str, object]] = {
@@ -195,10 +195,15 @@ class WeatherMarketImbalanceStrategy(Strategy):
 
         _vwap = vwap if vwap is not None else pd.DataFrame()
         _volume = volume if volume is not None else pd.DataFrame()
+        _sd_bands = SdBands()
+        _vwap_ind = Vwap(volume=_volume)
         self.indicator_defs = [
+            _sd_bands,
+            _vwap_ind,
             VwapSlope(
                 vwap=_vwap,
                 volume=_volume,
+                vwap_indicator=_vwap_ind,
                 lookback=self.vwap_slope_lookback,
                 mode=self.vwap_slope_mode,
                 value_per_point=self.vwap_slope_value_per_point,
@@ -207,6 +212,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
             VwapSlope(
                 vwap=_vwap,
                 volume=_volume,
+                vwap_indicator=_vwap_ind,
                 lookback=self.vwap_slope_lookback,
                 mode="raw",
                 name="vwap_slope_raw",
@@ -214,11 +220,13 @@ class WeatherMarketImbalanceStrategy(Strategy):
             VwapVolumeImbalance(
                 vwap=_vwap,
                 volume=_volume,
+                vwap_indicator=_vwap_ind,
                 lookback=self.vwap_volume_imbalance_lookback,
             ),
             BandPosition(
                 lookback_hours=lookback_hours,
                 lookback_bars=int(lookback) if lookback_hours is None else None,
+                sd_bands=_sd_bands,
             ),
             MeanReversion(
                 window=self.mean_reversion_window,

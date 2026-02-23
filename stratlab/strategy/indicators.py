@@ -144,6 +144,126 @@ def _transform_slope(raw: float, mode: str, value_per_point: float, scale: float
 
 
 # ---------------------------------------------------------------------------
+# Vwap
+# ---------------------------------------------------------------------------
+
+class Vwap(Indicator):
+    """Incremental VWAP indicator computed from close prices and volume.
+
+    Computes VWAP = Σ(price × volume) / Σ(volume) over a rolling or expanding
+    window, updating O(1) per bar for the expanding case.
+
+    Other indicators (``VwapSlope``, ``VwapVolumeImbalance``) can reference
+    this instance via their ``vwap_indicator`` parameter instead of receiving
+    a pre-built external VWAP DataFrame.
+
+    Parameters
+    ----------
+    volume:
+        Volume DataFrame aligned to prices (same index/columns).
+    window_bars:
+        Rolling window in bars.  ``None`` (default) → expanding from bar 0
+        (session / full-history VWAP).
+    """
+
+    def __init__(
+        self,
+        volume: pd.DataFrame,
+        window_bars: int | None = None,
+        name: str = "vwap",
+        plot_panel: int | None = 0,
+    ) -> None:
+        self._volume = volume
+        self.window_bars = window_bars
+        self._indicator_name = name
+        self._plot_panel = plot_panel
+        self._values: dict[str, list[float]] = {}
+        self._ts_lists: dict[str, list] = {}
+        # Expanding: scalar running sums.  Rolling: lists of bar-level (p*v, v).
+        self._pv_acc: dict[str, Any] = {}
+        self._v_acc: dict[str, Any] = {}
+        self._next_bar: int = -1
+
+    @property
+    def name(self) -> str:
+        return self._indicator_name
+
+    def _process_bar(self, prices: pd.DataFrame, i: int) -> None:
+        ts = prices.index[i]
+        for asset in prices.columns:
+            try:
+                p = float(prices.iloc[i][asset])
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(p):
+                continue
+            if asset not in self._volume.columns:
+                continue
+            try:
+                v = float(self._volume.iloc[i][asset])
+            except (TypeError, ValueError):
+                v = 0.0
+            if not np.isfinite(v):
+                v = 0.0
+
+            if self.window_bars is None:
+                # Expanding: O(1) running sums
+                pv_sum = float(self._pv_acc.get(asset, 0.0)) + p * v
+                v_sum  = float(self._v_acc.get(asset, 0.0)) + v
+                self._pv_acc[asset] = pv_sum
+                self._v_acc[asset]  = v_sum
+                vwap_val = pv_sum / v_sum if v_sum > 0.0 else p
+            else:
+                # Rolling: keep a list of the last window_bars bar-level sums
+                pv_hist = self._pv_acc.setdefault(asset, [])
+                v_hist  = self._v_acc.setdefault(asset, [])
+                pv_hist.append(p * v)  # type: ignore[union-attr]
+                v_hist.append(v)       # type: ignore[union-attr]
+                w = self.window_bars
+                total_v = sum(v_hist[-w:])  # type: ignore[arg-type]
+                vwap_val = sum(pv_hist[-w:]) / total_v if total_v > 0.0 else p  # type: ignore[arg-type]
+
+            self._values.setdefault(asset, []).append(vwap_val)
+            self._ts_lists.setdefault(asset, []).append(ts)
+
+    def compute(
+        self,
+        prices: pd.DataFrame,
+        returns: pd.DataFrame,
+        index: int,
+    ) -> pd.Series:
+        """Return current bar's VWAP per asset as a ``pd.Series``.
+
+        On first call processes all bars from 0 up to *index* (catch-up pass)
+        so that ``vwap_slice`` has full history from the start of the series.
+        """
+        if self._next_bar < 0:
+            self._next_bar = 0
+        for i in range(self._next_bar, index + 1):
+            self._process_bar(prices, i)
+        self._next_bar = index + 1
+        result = {a: self._values[a][-1] for a in prices.columns if a in self._values}
+        return pd.Series(result, dtype=float)
+
+    def vwap_slice(self, asset: str, from_ts, to_ts) -> "pd.Series | None":
+        """Return VWAP history for *asset* between *from_ts* and *to_ts* inclusive.
+
+        Uses binary search for O(log n + w) lookup.
+        Returns ``None`` if no data is available for the requested range.
+        """
+        import bisect
+        ts_list = self._ts_lists.get(asset)
+        vals = self._values.get(asset)
+        if not ts_list or not vals:
+            return None
+        lo = bisect.bisect_left(ts_list, from_ts)
+        hi = bisect.bisect_right(ts_list, to_ts)
+        if lo >= hi:
+            return None
+        return pd.Series(vals[lo:hi], index=ts_list[lo:hi], dtype=float)
+
+
+# ---------------------------------------------------------------------------
 # VwapSlope
 # ---------------------------------------------------------------------------
 
@@ -157,7 +277,8 @@ class VwapSlope(Indicator):
     ----------
     vwap:
         DataFrame of VWAP prices aligned to the prices/returns DataFrames
-        (same index, one column per asset).
+        (same index, one column per asset).  Ignored when *vwap_indicator*
+        is provided.
     volume:
         Optional volume DataFrame. When provided, bars with zero volume are
         excluded from the regression (matches Sierra Chart behaviour).
@@ -171,11 +292,14 @@ class VwapSlope(Indicator):
         Normalization divisor applied before scaled/angle conversion.
     scale:
         Multiplier applied after normalization.
+    vwap_indicator:
+        ``Vwap`` indicator instance.  When set, VWAP values are sourced from
+        this indicator's accumulated history (takes precedence over *vwap*).
     """
 
     def __init__(
         self,
-        vwap: pd.DataFrame,
+        vwap: pd.DataFrame | None = None,
         volume: pd.DataFrame | None = None,
         lookback: int = 30,
         mode: str = "scaled",
@@ -183,9 +307,11 @@ class VwapSlope(Indicator):
         scale: float = 1.0,
         name: str = "vwap_slope",
         plot_panel: int | None = 2,
+        vwap_indicator: "Vwap | None" = None,
     ) -> None:
-        self._vwap = vwap
+        self._vwap = vwap if vwap is not None else pd.DataFrame()
         self._volume = volume
+        self.vwap_indicator = vwap_indicator
         self.lookback = int(lookback)
         self.mode = mode
         self.value_per_point = float(value_per_point)
@@ -197,24 +323,38 @@ class VwapSlope(Indicator):
     def name(self) -> str:
         return self._indicator_name
 
-    def _slope_for_asset(self, asset: str, index: int) -> float:
-        if asset not in self._vwap.columns:
-            return 0.0
-
+    def _slope_for_asset(self, prices: pd.DataFrame, asset: str, index: int) -> float:
         start = max(0, index - self.lookback + 1)
-        vwap_slice = self._vwap.iloc[start: index + 1][asset]
-        # bar_offsets must match vwap_slice length (vwap may be shorter than prices)
-        bar_offsets = np.arange(start, start + len(vwap_slice), dtype=float)
 
-        if self._volume is not None and asset in self._volume.columns:
-            vol_slice = self._volume.iloc[start: index + 1][asset]
-            valid = (vol_slice.fillna(0.0) > 0.0) & vwap_slice.notna()
-            y = vwap_slice[valid].to_numpy(dtype=float)
-            x = bar_offsets[valid.to_numpy(dtype=bool)]
+        if self.vwap_indicator is not None:
+            from_ts = prices.index[start]
+            to_ts   = prices.index[index]
+            vwap_ser = self.vwap_indicator.vwap_slice(asset, from_ts, to_ts)
+            if vwap_ser is None or len(vwap_ser) < 2:
+                return 0.0
+            if self._volume is not None and asset in self._volume.columns:
+                vol_slice = self._volume.loc[vwap_ser.index, asset].fillna(0.0)
+                valid = (vol_slice > 0.0) & vwap_ser.notna()
+                vwap_ser = vwap_ser[valid]
+            if len(vwap_ser) < 2:
+                return 0.0
+            x = np.arange(len(vwap_ser), dtype=float)
+            y = vwap_ser.to_numpy(dtype=float)
         else:
-            valid = vwap_slice.notna()
-            y = vwap_slice[valid].to_numpy(dtype=float)
-            x = bar_offsets[valid.to_numpy(dtype=bool)]
+            if asset not in self._vwap.columns:
+                return 0.0
+            vwap_slice = self._vwap.iloc[start: index + 1][asset]
+            # bar_offsets must match vwap_slice length (vwap may be shorter than prices)
+            bar_offsets = np.arange(start, start + len(vwap_slice), dtype=float)
+            if self._volume is not None and asset in self._volume.columns:
+                vol_slice = self._volume.iloc[start: index + 1][asset]
+                valid = (vol_slice.fillna(0.0) > 0.0) & vwap_slice.notna()
+                y = vwap_slice[valid].to_numpy(dtype=float)
+                x = bar_offsets[valid.to_numpy(dtype=bool)]
+            else:
+                valid = vwap_slice.notna()
+                y = vwap_slice[valid].to_numpy(dtype=float)
+                x = bar_offsets[valid.to_numpy(dtype=bool)]
 
         raw = _polyfit_slope(x, y)
         return _transform_slope(raw, self.mode, self.value_per_point, self.scale)
@@ -226,7 +366,7 @@ class VwapSlope(Indicator):
         index: int,
     ) -> pd.Series:
         assets = prices.columns.tolist()
-        slopes = {a: self._slope_for_asset(a, index) for a in assets}
+        slopes = {a: self._slope_for_asset(prices, a, index) for a in assets}
         return pd.Series(slopes, dtype=float)
 
 
@@ -243,23 +383,29 @@ class VwapVolumeImbalance(Indicator):
     Parameters
     ----------
     vwap:
-        VWAP DataFrame aligned to prices (same index/columns).
+        VWAP DataFrame aligned to prices (same index/columns).  Ignored when
+        *vwap_indicator* is provided.
     volume:
         Volume DataFrame aligned to prices.
     lookback:
         Rolling window size in bars for the volume sums.
+    vwap_indicator:
+        ``Vwap`` indicator instance.  When set, VWAP values are sourced from
+        this indicator's accumulated history (takes precedence over *vwap*).
     """
 
     def __init__(
         self,
-        vwap: pd.DataFrame,
-        volume: pd.DataFrame,
+        vwap: pd.DataFrame | None = None,
+        volume: pd.DataFrame = pd.DataFrame(),
         lookback: int = 30,
         name: str = "vwap_volume_imbalance",
         plot_panel: int | None = 1,
+        vwap_indicator: "Vwap | None" = None,
     ) -> None:
-        self._vwap = vwap
+        self._vwap = vwap if vwap is not None else pd.DataFrame()
         self._volume = volume
+        self.vwap_indicator = vwap_indicator
         self.lookback = int(lookback)
         self._indicator_name = name
         self._plot_panel = plot_panel
@@ -269,16 +415,23 @@ class VwapVolumeImbalance(Indicator):
         return self._indicator_name
 
     def _imbalance_for_asset(self, prices: pd.DataFrame, asset: str, index: int) -> float:
-        if (
-            asset not in self._vwap.columns
-            or asset not in self._volume.columns
-            or asset not in prices.columns
-        ):
+        if asset not in self._volume.columns or asset not in prices.columns:
             return float("nan")
 
         price_hist = prices.iloc[: index + 1][asset]
-        vwap_hist = self._vwap.iloc[: index + 1][asset]
         vol_hist = self._volume.iloc[: index + 1][asset].fillna(0.0)
+
+        if self.vwap_indicator is not None:
+            from_ts = prices.index[0]
+            to_ts   = prices.index[index]
+            vwap_ser = self.vwap_indicator.vwap_slice(asset, from_ts, to_ts)
+            if vwap_ser is None:
+                return float("nan")
+            vwap_hist = vwap_ser.reindex(price_hist.index)
+        else:
+            if asset not in self._vwap.columns:
+                return float("nan")
+            vwap_hist = self._vwap.iloc[: index + 1][asset]
 
         valid = vwap_hist.notna() & (vol_hist > 0.0)
         vol_above = vol_hist.where(valid & (price_hist > vwap_hist), 0.0)
@@ -342,6 +495,7 @@ class BandPosition(Indicator):
         lookback_bars: int | None = None,
         name: str = "band_position",
         plot_panel: int | None = None,
+        sd_bands: "SdBands | None" = None,
     ) -> None:
         if lookback_hours is None and lookback_bars is None:
             raise ValueError("Provide at least one of lookback_hours or lookback_bars.")
@@ -349,6 +503,7 @@ class BandPosition(Indicator):
         self.lookback_bars = lookback_bars
         self._indicator_name = name
         self._plot_panel = plot_panel
+        self.sd_bands = sd_bands
 
     @property
     def name(self) -> str:
@@ -377,6 +532,28 @@ class BandPosition(Indicator):
             "within_1sd_pct": float(((p >= dn1) & (p <= up1)).sum() / n * 100.0),
         }
 
+    @staticmethod
+    def _stats_with_bands(
+        prices_arr: np.ndarray,
+        mean_vals: np.ndarray,
+        up1_vals: np.ndarray,
+        dn1_vals: np.ndarray,
+    ) -> dict[str, float]:
+        valid = np.isfinite(mean_vals) & np.isfinite(up1_vals) & np.isfinite(dn1_vals)
+        p = prices_arr[valid]
+        m = mean_vals[valid]
+        up1 = up1_vals[valid]
+        dn1 = dn1_vals[valid]
+        n = len(p)
+        if n == 0:
+            return {k: 0.0 for k in BandPosition._STATS}
+        return {
+            "above_mean_pct":      float((p > m).sum()  / n * 100.0),
+            "above_1sd_pct":       float((p > up1).sum() / n * 100.0),
+            "below_minus_1sd_pct": float((p < dn1).sum() / n * 100.0),
+            "within_1sd_pct":      float(((p >= dn1) & (p <= up1)).sum() / n * 100.0),
+        }
+
     def _window_start(self, prices: pd.DataFrame, index: int) -> int:
         return _lookback_window_start(prices, index, self.lookback_hours, self.lookback_bars)
 
@@ -387,11 +564,23 @@ class BandPosition(Indicator):
         index: int,
     ) -> pd.DataFrame:
         start = self._window_start(prices, index)
-        assets = prices.columns.tolist()
         result: dict[str, dict[str, float]] = {}
-        for asset in assets:
-            window = prices.iloc[start: index + 1][asset].dropna().to_numpy(dtype=float)
-            result[asset] = self._stats_for_window(window)
+        for asset in prices.columns.tolist():
+            window_ser = prices.iloc[start: index + 1][asset].dropna()
+            if self.sd_bands is not None and len(window_ser) > 0:
+                bands_df = self.sd_bands.band_slice(
+                    asset, window_ser.index[0], window_ser.index[-1]
+                )
+                if bands_df is not None and len(bands_df) > 0:
+                    aligned = bands_df.reindex(window_ser.index)
+                    result[asset] = self._stats_with_bands(
+                        window_ser.to_numpy(dtype=float),
+                        aligned["mean"].to_numpy(dtype=float),
+                        aligned["+1sd"].to_numpy(dtype=float),
+                        aligned["-1sd"].to_numpy(dtype=float),
+                    )
+                    continue
+            result[asset] = self._stats_for_window(window_ser.to_numpy(dtype=float))
         return pd.DataFrame(result, index=self._STATS)
 
 
@@ -517,6 +706,106 @@ def sd_bands_rolling(
             "-3sd": m - 3 * s,
         })
     return pd.DataFrame(rows, index=idx)
+
+
+class SdBands(Indicator):
+    """Expanding mean/std band indicator, computed incrementally per bar.
+
+    Maintains running sum/sum_sq/count per asset for O(1) per-bar updates
+    (vs. O(n) per bar in the standalone ``sd_bands_rolling`` function).
+    Accumulates the full band history accessible via ``band_series``.
+    """
+
+    @property
+    def name(self) -> str:
+        return "sd_bands"
+
+    def __init__(self) -> None:
+        self._sums: dict[str, float] = {}
+        self._sum_sqs: dict[str, float] = {}
+        self._counts: dict[str, int] = {}
+        self._history: dict[str, list[tuple]] = {}
+        self._ts_lists: dict[str, list] = {}
+        self._next_bar: int = -1
+
+    def _process_bar(self, prices: pd.DataFrame, i: int) -> None:
+        ts = prices.index[i]
+        for asset in prices.columns:
+            try:
+                price = float(prices.iloc[i][asset])
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(price):
+                continue
+            self._sums[asset] = self._sums.get(asset, 0.0) + price
+            self._sum_sqs[asset] = self._sum_sqs.get(asset, 0.0) + price * price
+            self._counts[asset] = self._counts.get(asset, 0) + 1
+            n = self._counts[asset]
+            mean = self._sums[asset] / n
+            var = max(self._sum_sqs[asset] / n - mean ** 2, 0.0)
+            s = float(np.sqrt(var))
+            band_s = pd.Series({
+                "mean": mean,
+                "+1sd": mean + s,   "-1sd": mean - s,
+                "+2sd": mean + 2*s, "-2sd": mean - 2*s,
+                "+3sd": mean + 3*s, "-3sd": mean - 3*s,
+            })
+            self._history.setdefault(asset, []).append((ts, band_s))
+            self._ts_lists.setdefault(asset, []).append(ts)
+
+    def compute(
+        self,
+        prices: pd.DataFrame,
+        returns: pd.DataFrame,
+        index: int,
+    ) -> pd.DataFrame:
+        """Return current band values as DataFrame with shape (7, n_assets).
+
+        Index rows: ``["mean", "+1sd", "-1sd", "+2sd", "-2sd", "+3sd", "-3sd"]``
+        Columns: asset names
+
+        On first call, processes all bars from 0 up to *index* (catch-up pass)
+        so that ``band_slice`` has full history from the start of the price series.
+        Subsequent calls process exactly one bar per invocation.
+        """
+        if self._next_bar < 0:
+            self._next_bar = 0
+        for i in range(self._next_bar, index + 1):
+            self._process_bar(prices, i)
+        self._next_bar = index + 1
+        result = {a: self._history[a][-1][1] for a in prices.columns if a in self._history}
+        return pd.DataFrame(result)
+
+    def band_slice(self, asset: str, from_ts, to_ts) -> "pd.DataFrame | None":
+        """Return band history for *asset* between *from_ts* and *to_ts* inclusive.
+
+        Uses binary search for O(log n + w) lookup.
+        Returns ``None`` if no data is available for the requested range.
+        """
+        import bisect
+        ts_list = self._ts_lists.get(asset)
+        hist = self._history.get(asset)
+        if not ts_list or not hist:
+            return None
+        lo = bisect.bisect_left(ts_list, from_ts)
+        hi = bisect.bisect_right(ts_list, to_ts)
+        if lo >= hi:
+            return None
+        rows = hist[lo:hi]
+        return pd.DataFrame([r[1] for r in rows], index=[r[0] for r in rows])
+
+    @property
+    def band_series(self) -> dict[str, pd.DataFrame]:
+        """Full band history keyed by asset name.
+
+        Each value is a DataFrame of shape ``(n_bars, 7)`` indexed by timestamp,
+        with columns ``["mean", "+1sd", "-1sd", "+2sd", "-2sd", "+3sd", "-3sd"]``.
+        """
+        return {
+            asset: pd.DataFrame([r[1] for r in rows], index=[r[0] for r in rows])
+            for asset, rows in self._history.items()
+            if rows
+        }
 
 
 def market_regimes(

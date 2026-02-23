@@ -86,6 +86,7 @@ def _prepare_market_data(
     vwap: pd.DataFrame | None,
     volume: pd.DataFrame | None,
     suffix_re,
+    sdbands: dict[str, pd.DataFrame] | None = None,
 ):
     """Extract and pre-compute all data structures needed to draw a market's panels.
 
@@ -119,7 +120,10 @@ def _prepare_market_data(
 
     price_arr = mdf["price"].to_numpy(dtype=float)
     timestamps = mdf["timestamp"].to_numpy()
-    bands_full = sd_bands_rolling(price_arr, timestamps).copy()
+    if sdbands is not None and market in sdbands:
+        bands_full = sdbands[market].reindex(pd.to_datetime(series.index)).copy()
+    else:
+        bands_full = sd_bands_rolling(price_arr, timestamps).copy()
     bands_full["price"] = price_arr
     bands_full["timestamp"] = timestamps
     band_cols = ["timestamp", "price", "mean", "-3sd", "-2sd", "-1sd", "+1sd", "+2sd", "+3sd"]
@@ -358,6 +362,7 @@ def _plot_market_panels(
     slope_ind: VwapSlope | None,
     ind_map: dict,
     suffix_re,
+    sdbands: dict[str, pd.DataFrame] | None = None,
     max_vwap_slope: float | None = None,
     mean_reversion_threshold: float | None = 0.5,
     vwap_slope_mode: str = "raw",
@@ -365,7 +370,7 @@ def _plot_market_panels(
     mean_reversion_window: int = 5,
 ) -> None:
     """Orchestrate all 6 panels for a single market into the pre-allocated axes."""
-    result = _prepare_market_data(market, prices, vwap, volume, suffix_re)
+    result = _prepare_market_data(market, prices, vwap, volume, suffix_re, sdbands=sdbands)
     if result is None:
         for a in axes6:
             a.set_visible(False)
@@ -524,6 +529,11 @@ def plot_entries_exits(
     ind_map = {ind.name: ind for ind in indicator_defs}
     _returns = prices.pct_change()
 
+    _sd_bands_ind = ind_map.get("sd_bands")
+    sdbands: dict[str, pd.DataFrame] | None = (
+        _sd_bands_ind.band_series if _sd_bands_ind is not None else None  # type: ignore[union-attr]
+    )
+
     slope_ind: VwapSlope | None = ind_map.get("vwap_slope")  # type: ignore[assignment]
 
     if indicator_series is not None:
@@ -550,6 +560,7 @@ def plot_entries_exits(
             vwap=vwap, volume=volume, buy_volume=buy_volume, sell_volume=sell_volume,
             slope_df=slope_df, imbalance_df=imbalance_df, mr_df=mr_df,
             slope_ind=slope_ind, ind_map=ind_map, suffix_re=suffix_re,
+            sdbands=sdbands,
             max_vwap_slope=max_vwap_slope, mean_reversion_threshold=mean_reversion_threshold,
             vwap_slope_mode=vwap_slope_mode, vwap_slope_lookback=vwap_slope_lookback,
             mean_reversion_window=mean_reversion_window,
