@@ -176,10 +176,10 @@ def _draw_price_panel(
     full_regime, full_conf = market_regimes(pos, mean_rev_full)
 
     ax.set_title(
-        f"{display_market}\nFull: {full_regime} ({full_conf:.2f}) — {windows_str}\n{trade_info}",
-        fontsize=8,
+        f"{display_market}  |  {full_regime} ({full_conf:.2f})  |  {windows_str}  |  {trade_info}",
+        fontsize=7, loc="left", pad=2,
     )
-    ax.tick_params(axis="x", rotation=45, labelbottom=True, labelsize=8)
+    ax.tick_params(axis="x", rotation=45, labelsize=8)
     ax.grid(alpha=0.3)
 
 
@@ -490,12 +490,23 @@ def plot_entries_exits(
 
     cols = 2
     rows = (len(markets) + cols - 1) // cols
+    _PANEL_RATIOS = [3, 2.0, 2.0, 0.9, 1.2, 1.2]
+    _SPACER_RATIO = 0.6  # blank row between market groups; absorbs x-tick labels + next title
+    # stride: number of figure rows per market group (6 panels + 1 spacer, except last group)
+    stride = 7 if rows > 1 else 6
+    total_fig_rows = rows * 6 + max(0, rows - 1)
+    height_ratios: list[float] = []
+    for r in range(rows):
+        height_ratios.extend(_PANEL_RATIOS)
+        if r < rows - 1:
+            height_ratios.append(_SPACER_RATIO)
+
     fig, axes = plt.subplots(
-        rows * 6,
+        total_fig_rows,
         cols,
         figsize=(16, 13 * rows),
         sharex="col",
-        gridspec_kw={"height_ratios": [3, 2.0, 2.0, 0.9, 1.2, 1.2] * rows},
+        gridspec_kw={"height_ratios": height_ratios},
     )
 
     if isinstance(axes, np.ndarray):
@@ -554,7 +565,7 @@ def plot_entries_exits(
     for idx, market in enumerate(markets):
         grid_row = idx // cols
         grid_col = idx % cols
-        axes6 = axes[grid_row * 6: grid_row * 6 + 6, grid_col]
+        axes6 = axes[grid_row * stride: grid_row * stride + 6, grid_col]
         _plot_market_panels(
             axes6=axes6, market=market, prices=prices, trades=trades,
             vwap=vwap, volume=volume, buy_volume=buy_volume, sell_volume=sell_volume,
@@ -566,12 +577,30 @@ def plot_entries_exits(
             mean_reversion_window=mean_reversion_window,
         )
 
+    # Hide spacer rows between market groups
+    if rows > 1:
+        for r in range(rows - 1):
+            spacer_flat = r * stride + 6
+            for c in range(cols):
+                ax_sp = axes[spacer_flat, c]
+                ax_sp.set_visible(False)
+                ax_sp.tick_params(axis="both", which="both",
+                                  bottom=False, left=False,
+                                  labelbottom=False, labelleft=False)
+
     total_slots = rows * cols
     for i in range(len(markets), total_slots):
         grid_row = i // cols
         grid_col = i % cols
         for panel in range(6):
-            axes[grid_row * 6 + panel, grid_col].set_visible(False)
+            axes[grid_row * stride + panel, grid_col].set_visible(False)
+
+    # Suppress x-tick labels on all non-bottom panels; only panel 5 of each
+    # market group shows them (the spacer row provides room below for the labels).
+    for r in range(rows):
+        for c in range(cols):
+            for p in range(6):
+                axes[r * stride + p, c].tick_params(axis="x", labelbottom=(p == 5))
 
     handles = [
         Line2D([0], [0], marker="v", color="w", markerfacecolor="#8B0000", markersize=7,
@@ -592,7 +621,7 @@ def plot_entries_exits(
     fig.legend(
         handles=handles,
         loc="upper center",
-        bbox_to_anchor=(0.5, 0.965),
+        bbox_to_anchor=(0.5, 0.955),
         ncol=min(4, len(handles)),
         frameon=False,
         fontsize=9,
@@ -600,8 +629,9 @@ def plot_entries_exits(
         handletextpad=0.4,
     )
     compact_event = _compact_event_slug(event_slug)
-    plt.suptitle(f"{compact_event}  |  {strategy_name}", fontsize=10, y=0.995)
-    plt.tight_layout(rect=(0, 0, 1, 0.90))
+    plt.suptitle(f"{compact_event}  |  {strategy_name}", fontsize=10, y=0.985)
+    plt.tight_layout(rect=(0, 0.04, 1, 0.92))
+    fig.subplots_adjust(hspace=0.08)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=100)
     plt.close(fig)
