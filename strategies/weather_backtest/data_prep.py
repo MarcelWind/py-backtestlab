@@ -134,10 +134,21 @@ def _load_event_rows(event_slug: str, prefer_outcome: str | None = None) -> pd.D
 def _build_matrices(
     df: pd.DataFrame,
     resample_rule: str | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None]:
 
     last_value: Callable[[pd.Series], float] = lambda x: float(x.iloc[-1])
     closes = df.pivot_table(index="_ts", columns="market", values="close", aggfunc=last_value)
+    
+    # Extract OHLC data if available
+    highs = None
+    lows = None
+    opens = None
+    if "high" in df.columns:
+        highs = df.pivot_table(index="_ts", columns="market", values="high", aggfunc=last_value)
+    if "low" in df.columns:
+        lows = df.pivot_table(index="_ts", columns="market", values="low", aggfunc=last_value)
+    if "open" in df.columns:
+        opens = df.pivot_table(index="_ts", columns="market", values="open", aggfunc=last_value)
 
     # Raw volume matrix (sum over duplicate timestamps if present).
     volumes = df.pivot_table(index="_ts", columns="market", values="volume", aggfunc="sum")
@@ -176,6 +187,14 @@ def _build_matrices(
         buy_volumes = buy_volumes.reindex(closes.index).fillna(0.0)
     if sell_volumes is not None:
         sell_volumes = sell_volumes.reindex(closes.index).fillna(0.0)
+    
+    # Align OHLC to closes
+    if highs is not None:
+        highs = highs.reindex(closes.index).reindex(columns=closes.columns)
+    if lows is not None:
+        lows = lows.reindex(closes.index).reindex(columns=closes.columns)
+    if opens is not None:
+        opens = opens.reindex(closes.index).reindex(columns=closes.columns)
 
     # Instantaneous bar VWAP from source column, volume-weighted over
     # duplicate timestamps for each market.
@@ -187,13 +206,25 @@ def _build_matrices(
     closes = closes.loc[:, valid_cols]
     volumes = volumes.loc[:, valid_cols]
     vwaps = vwaps.loc[:, valid_cols]
+    if highs is not None:
+        highs = highs.loc[:, valid_cols]
+    if lows is not None:
+        lows = lows.loc[:, valid_cols]
+    if opens is not None:
+        opens = opens.loc[:, valid_cols]
 
     closes = closes.dropna(axis=0, how="any")
     volumes = volumes.reindex(closes.index).fillna(0.0)
     vwaps = vwaps.reindex(closes.index)
+    if highs is not None:
+        highs = highs.reindex(closes.index)
+    if lows is not None:
+        lows = lows.reindex(closes.index)
+    if opens is not None:
+        opens = opens.reindex(closes.index)
 
     if not resample_rule:
-        return closes, vwaps, volumes, buy_volumes, sell_volumes
+        return closes, vwaps, volumes, buy_volumes, sell_volumes, highs, lows, opens
 
     closes = closes.resample(resample_rule).last().ffill()
     volumes = volumes.resample(resample_rule).sum().fillna(0.0).reindex(columns=closes.columns)
@@ -201,6 +232,12 @@ def _build_matrices(
         buy_volumes = buy_volumes.resample(resample_rule).sum().fillna(0.0)
     if sell_volumes is not None:
         sell_volumes = sell_volumes.resample(resample_rule).sum().fillna(0.0)
+    if highs is not None:
+        highs = highs.resample(resample_rule).max().reindex(columns=closes.columns)
+    if lows is not None:
+        lows = lows.resample(resample_rule).min().reindex(columns=closes.columns)
+    if opens is not None:
+        opens = opens.resample(resample_rule).first().reindex(columns=closes.columns)
 
     # Resampled VWAP = sum(vwap * volume) / sum(volume), still no forward-fill.
     weighted = (vwaps * volumes.reindex(vwaps.index).fillna(0.0)).resample(resample_rule).sum()
@@ -215,14 +252,24 @@ def _build_matrices(
     if sell_volumes is not None:
         sell_volumes = sell_volumes.reindex(closes.index).fillna(0.0)
     vwaps = vwaps.reindex(closes.index)
-    return closes, vwaps, volumes, buy_volumes, sell_volumes
+    if highs is not None:
+        highs = highs.reindex(closes.index)
+    if lows is not None:
+        lows = lows.reindex(closes.index)
+    if opens is not None:
+        opens = opens.reindex(closes.index)
+    
+    return closes, vwaps, volumes, buy_volumes, sell_volumes, highs, lows, opens
 
 
-def load_event_ohlcv(event_slug: str, prefer_outcome: str | None = "yes") -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None]:
-    """Load one Polymarket event and build close/vwap/volume matrices.
+def load_event_ohlcv(event_slug: str, prefer_outcome: str | None = "yes") -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None]:
+    """Load one Polymarket event and build close/vwap/volume/OHLC matrices.
 
     By default this will prefer the `yes` outcome token when markets are
     suffixed with `__yes`/`__no`.
+    
+    Returns:
+        (closes, vwaps, volumes, buy_volumes, sell_volumes, highs, lows, opens)
     """
     df = _load_event_rows(event_slug, prefer_outcome=prefer_outcome)
     return _build_matrices(df, resample_rule=None)
@@ -232,12 +279,15 @@ def load_event_ohlcv_resampled(
     event_slug: str,
     resample_rule: str | None = None,
     prefer_outcome: str | None = "yes",
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None]:
     """Load event OHLCV and optionally downsample bars.
 
     Args:
         event_slug: Event identifier.
         resample_rule: Pandas rule (e.g. "5min", "10min"). If None, no resample.
+    
+    Returns:
+        (closes, vwaps, volumes, buy_volumes, sell_volumes, highs, lows, opens)
     """
     df = _load_event_rows(event_slug, prefer_outcome=prefer_outcome)
     return _build_matrices(df, resample_rule=resample_rule)

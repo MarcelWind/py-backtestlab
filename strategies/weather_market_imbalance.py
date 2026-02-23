@@ -110,6 +110,10 @@ class WeatherMarketImbalanceStrategy(Strategy):
         vwap_volume_imbalance_lookback: int | None = None,
         vwap: pd.DataFrame | None = None,
         volume: pd.DataFrame | None = None,
+        high: pd.DataFrame | None = None,
+        low: pd.DataFrame | None = None,
+        open_: pd.DataFrame | None = None,
+        pricing_method: str = "typical",
         vwap_slope_mode: str = "scaled",
         vwap_slope_value_per_point: float = 1e-4,
         vwap_slope_scale: float = 1.0,
@@ -195,8 +199,23 @@ class WeatherMarketImbalanceStrategy(Strategy):
 
         _vwap = vwap if vwap is not None else pd.DataFrame()
         _volume = volume if volume is not None else pd.DataFrame()
-        _sd_bands = SdBands()
-        _vwap_ind = Vwap(volume=_volume)
+        _high = high
+        _low = low
+        _open = open_
+        
+        _sd_bands = SdBands(
+            pricing_method=pricing_method,
+            high=_high,
+            low=_low,
+            open_=_open,
+        )
+        _vwap_ind = Vwap(
+            volume=_volume,
+            pricing_method=pricing_method,
+            high=_high,
+            low=_low,
+            open_=_open,
+        )
         self.indicator_defs = [
             _sd_bands,
             _vwap_ind,

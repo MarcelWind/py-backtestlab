@@ -215,7 +215,7 @@ def _draw_vol_delta_panel(
     yes_ser = vol_df[yes_col].reindex(series.index).fillna(0.0)
     no_ser = vol_df[no_col].reindex(series.index).fillna(0.0)
     delta = yes_ser - no_ser
-    colors = ["#006400" if v >= 0 else "#8B0000" for v in delta.values]
+    colors = ["#00FF00" if v >= 0 else "#FF0000" for v in delta.values]
     ax.bar(delta.index, delta.values, width=bar_width_days, color=colors,
            alpha=0.75, align="center", edgecolor="none")
     ax.set_title(f"{style['title']}  |  line = cumulative Δ", fontsize=7, loc="left", pad=2)
@@ -226,9 +226,9 @@ def _draw_vol_delta_panel(
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m %H:%M'))
     ax.set_xlim(xlim)
     ax.text(0.01, 0.97, style["up_label"], transform=ax.transAxes, fontsize=7,
-            va="top", ha="left", color="#006400", alpha=0.85)
+            va="top", ha="left", color="#00FF00", alpha=0.85)
     ax.text(0.01, 0.03, style["dn_label"], transform=ax.transAxes, fontsize=7,
-            va="bottom", ha="left", color="#8B0000", alpha=0.85)
+            va="bottom", ha="left", color="#FF0000", alpha=0.85)
     cum_delta = delta.cumsum()
     if len(cum_delta) > 0:
         cum_delta = cum_delta - cum_delta.iloc[0]
@@ -249,6 +249,7 @@ def _draw_vol_imbalance_row(
     market_trades: pd.DataFrame,
     ind_map: dict,
     xlim,
+    magnitude_threshold: float | None = None,
 ) -> None:
     """Draw volume imbalance % panel (panel 3)."""
     if imbalance_df is None or market not in imbalance_df.columns:
@@ -261,7 +262,12 @@ def _draw_vol_imbalance_row(
         max(3, int(ind_map["vwap_volume_imbalance"].lookback))
         if "vwap_volume_imbalance" in ind_map else "?"
     )
-    draw_volume_imbalance_panel(ax, ratio_pct, entry_times, entry_vals, lookback)
+    # Extract signal values at rebalance points (index from imbalance_df)
+    signal_times = imbalance_df.index
+    signal_vals = imbalance_df[market] if market in imbalance_df.columns else None
+    draw_volume_imbalance_panel(ax, ratio_pct, entry_times, entry_vals, 
+                                signal_times=signal_times, signal_values=signal_vals, 
+                                lookback_label=lookback, magnitude_threshold=magnitude_threshold)
     ax.set_xlim(xlim)
 
 
@@ -278,6 +284,7 @@ def _draw_vwap_slope_row(
     vwap_slope_mode: str,
     vwap_slope_lookback: int,
     xlim,
+    magnitude_threshold: float | None = None,
 ) -> None:
     """Draw VWAP slope panel (panel 4)."""
     if slope_df is None or market not in slope_df.columns:
@@ -306,11 +313,17 @@ def _draw_vwap_slope_row(
             valid_mask = vwap_check.notna()
         upd_pct = float(valid_mask.mean() * 100.0)
 
+    # Extract signal values at rebalance points (index from slope_df)
+    signal_times = slope_df.index
+    signal_vals = slope_df[market] if market in slope_df.columns else None
+    
     draw_vwap_slope_panel(
         ax, slope_series,
         entry_times=entry_times, entry_values=entry_vals,
+        signal_times=signal_times, signal_values=signal_vals,
         threshold=max_vwap_slope,
         mode_label=mode_lbl, lookback_label=lb_lbl, update_pct=upd_pct,
+        magnitude_threshold=magnitude_threshold,
     )
     ax.set_xlim(xlim)
 
@@ -325,6 +338,7 @@ def _draw_mean_reversion_row(
     mean_reversion_threshold: float | None,
     mean_reversion_window: int,
     xlim,
+    magnitude_threshold: float | None = None,
 ) -> None:
     """Draw mean-reversion score panel (panel 5)."""
     mr_score = (
@@ -335,10 +349,17 @@ def _draw_mean_reversion_row(
     entry_times, entry_vals = _entry_markers(market_trades, mr_score)
     mr_ind = ind_map.get("mean_reversion")
     window_lbl = mr_ind.window if mr_ind is not None else mean_reversion_window
+    
+    # Extract signal values at rebalance points (index from mr_df)
+    signal_times = mr_df.index if mr_df is not None else None
+    signal_vals = mr_df[market] if mr_df is not None and market in mr_df.columns else None
+    
     draw_mean_reversion_panel(
         ax, mr_score,
         entry_times=entry_times, entry_values=entry_vals,
+        signal_times=signal_times, signal_values=signal_vals,
         threshold=mean_reversion_threshold, window_label=window_lbl,
+        magnitude_threshold=magnitude_threshold,
     )
     ax.set_xlim(xlim)
 
@@ -368,6 +389,9 @@ def _plot_market_panels(
     vwap_slope_mode: str = "raw",
     vwap_slope_lookback: int = 15,
     mean_reversion_window: int = 5,
+    signal_magnitude_threshold_imbalance: float | None = None,
+    signal_magnitude_threshold_slope: float | None = None,
+    signal_magnitude_threshold_meanrev: float | None = None,
 ) -> None:
     """Orchestrate all 6 panels for a single market into the pre-allocated axes."""
     result = _prepare_market_data(market, prices, vwap, volume, suffix_re, sdbands=sdbands)
@@ -395,11 +419,14 @@ def _plot_market_panels(
                                  suffix_re, bar_width_days, xlim, kind="sell"):
         axes6[2].set_visible(False)
 
-    _draw_vol_imbalance_row(axes6[3], imbalance_df, market, market_trades, ind_map, xlim)
+    _draw_vol_imbalance_row(axes6[3], imbalance_df, market, market_trades, ind_map, xlim,
+                            magnitude_threshold=signal_magnitude_threshold_imbalance)
     _draw_vwap_slope_row(axes6[4], slope_df, market, series, market_trades, vwap, volume,
-                         slope_ind, max_vwap_slope, vwap_slope_mode, vwap_slope_lookback, xlim)
+                         slope_ind, max_vwap_slope, vwap_slope_mode, vwap_slope_lookback, xlim,
+                         magnitude_threshold=signal_magnitude_threshold_slope)
     _draw_mean_reversion_row(axes6[5], mr_df, market, series, market_trades, ind_map,
-                             mean_reversion_threshold, mean_reversion_window, xlim)
+                             mean_reversion_threshold, mean_reversion_window, xlim,
+                             magnitude_threshold=signal_magnitude_threshold_meanrev)
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +453,10 @@ def plot_entries_exits(
     max_vwap_slope: float | None = None,
     mean_reversion_window: int = 5,
     mean_reversion_threshold: float | None = 0.5,
+    # Signal visualization magnitude thresholds:
+    signal_magnitude_threshold_imbalance: float | None = None,
+    signal_magnitude_threshold_slope: float | None = None,
+    signal_magnitude_threshold_meanrev: float | None = None,
 ) -> None:
     """Plot price/regime plus debug panels per market at dpi=100.
 
@@ -575,6 +606,9 @@ def plot_entries_exits(
             max_vwap_slope=max_vwap_slope, mean_reversion_threshold=mean_reversion_threshold,
             vwap_slope_mode=vwap_slope_mode, vwap_slope_lookback=vwap_slope_lookback,
             mean_reversion_window=mean_reversion_window,
+            signal_magnitude_threshold_imbalance=signal_magnitude_threshold_imbalance,
+            signal_magnitude_threshold_slope=signal_magnitude_threshold_slope,
+            signal_magnitude_threshold_meanrev=signal_magnitude_threshold_meanrev,
         )
 
     # Hide spacer rows between market groups
@@ -603,7 +637,7 @@ def plot_entries_exits(
                 axes[r * stride + p, c].tick_params(axis="x", labelbottom=(p == 5))
 
     handles = [
-        Line2D([0], [0], marker="v", color="w", markerfacecolor="#8B0000", markersize=7,
+        Line2D([0], [0], marker="v", color="w", markerfacecolor="#FF0000", markersize=7,
                label="Short Entry"),
         Line2D([0], [0], marker="x", color="#111111", lw=0, markersize=7, label="Exit"),
         Line2D([0], [0], color="#6C6C6C", lw=5, alpha=0.35, label="Volume Profile"),

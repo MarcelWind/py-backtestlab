@@ -9,6 +9,7 @@ import sys
 import argparse
 import json
 import time
+import pickle
 import pandas as pd
 
 # Ensure project root is importable when running this file directly.
@@ -20,6 +21,162 @@ from stratlab.backtest.backtester import Backtester
 from stratlab.config import RESULTS_DIR
 from strategies.weather_backtest import load_event_ohlcv_resampled, plot_entries_exits
 from strategies.weather_market_imbalance import WeatherMarketImbalanceStrategy
+
+
+def find_latest_backtest_dir(event_slug: str) -> Path | None:
+    """Find the latest backtest results directory for an event.
+    
+    Returns the most recent timestamp directory, or None if none found.
+    """
+    base_dir = RESULTS_DIR / "weather_imbalance_test" / event_slug
+    if not base_dir.exists():
+        return None
+    
+    dirs = sorted([d for d in base_dir.iterdir() if d.is_dir()])
+    return dirs[-1] if dirs else None
+
+
+def replot_backtest(
+    event_slug: str,
+    timestamp: str | None = None,
+    resample_minutes: int = 5,
+    prefer_outcome: str = "yes",
+    signal_magnitude_threshold_imbalance: float | None = None,
+    signal_magnitude_threshold_slope: float | None = None,
+    signal_magnitude_threshold_meanrev: float | None = None,
+    verbose: bool = False,
+) -> None:
+    """Replot a previous backtest without re-running it.
+    
+    Parameters
+    ----------
+    event_slug:
+        Event slug (e.g. "highest-temperature-in-atlanta-on-february-20-2026")
+    timestamp:
+        Result timestamp (e.g. "20260223_155833"). If None, uses latest.
+    resample_minutes:
+        Original resample rate (must match how backtest was run).
+    prefer_outcome:
+        "yes" or "no" for outcome preference.
+    signal_magnitude_threshold_*:
+        Optional signal visualization thresholds.
+    verbose:
+        Print signal statistics and timing info.
+    """
+    t0 = time.perf_counter()
+    
+    # Find the backtest directory
+    if timestamp is None:
+        result_dir = find_latest_backtest_dir(event_slug)
+        if result_dir is None:
+            print(f"No backtest results found for event: {event_slug}")
+            return
+        timestamp = result_dir.name
+    else:
+        result_dir = RESULTS_DIR / "weather_imbalance_test" / event_slug / timestamp
+        if not result_dir.exists():
+            print(f"Backtest directory not found: {result_dir}")
+            return
+
+    # Load trades from saved CSV
+    trades_path = result_dir / "trades.csv"
+    if not trades_path.exists():
+        print(f"No trades file found: {trades_path}")
+        return
+    
+    trades_df = pd.read_csv(trades_path)
+    print(f"Loaded {len(trades_df)} trades from {trades_path}")
+
+    # Load indicator signals from saved pickle
+    indicator_signals_path = result_dir / "indicator_signals.pkl"
+    indicator_signals = None
+    if indicator_signals_path.exists():
+        with open(indicator_signals_path, "rb") as f:
+            indicator_signals = pickle.load(f)
+        print(f"Loaded indicator signals from {indicator_signals_path}")
+        
+        # Print signal statistics if verbose
+        if verbose and indicator_signals:
+            print("\n--- Signal Statistics ---")
+            for sig_name, sig_df in indicator_signals.items():
+                if isinstance(sig_df, pd.DataFrame):
+                    for col in sig_df.columns:
+                        vals = sig_df[col].dropna()
+                        if len(vals) > 0:
+                            nonzero = (vals.abs() > 1e-10).sum()
+                            print(f"  {sig_name}[{col}]: {len(vals)} values, "
+                                  f"{nonzero} non-zero, min={vals.min():.6f}, "
+                                  f"mean={vals.mean():.6f}, max={vals.max():.6f}")
+    else:
+        print(f"Warning: No indicator signals file found at {indicator_signals_path}")
+        indicator_signals = None
+
+    # Load event data (same as backtest)
+    resample_rule = f"{resample_minutes}min" if resample_minutes and resample_minutes > 0 else None
+    
+    t_load_start = time.perf_counter()
+    prices, vwap, volume, buy_volume, sell_volume, high, low, open_ = load_event_ohlcv_resampled(
+        event_slug,
+        resample_rule=resample_rule,
+        prefer_outcome=prefer_outcome,
+    )
+
+    # Load unfiltered matrices for plotting
+    try:
+        _p, _v, _vol, buy_volume_full, sell_volume_full, _, _, _ = load_event_ohlcv_resampled(
+            event_slug,
+            resample_rule=resample_rule,
+            prefer_outcome=None,
+        )
+    except Exception:
+        buy_volume_full = buy_volume
+        sell_volume_full = sell_volume
+    
+    t_load_end = time.perf_counter()
+    if verbose:
+        print(f"Data loading: {t_load_end - t_load_start:.2f}s")
+
+    # Create strategy instance to get indicator defs
+    strategy = WeatherMarketImbalanceStrategy.from_profile(
+        "balanced",
+        vwap=vwap,
+        volume=volume,
+        high=high,
+        low=low,
+        open_=open_,
+    )
+    
+    # Generate new plot with same data but possibly different visualization params
+    plot_path = result_dir / f"entries_exits_replot.png"
+    
+    t_plot_start = time.perf_counter()
+    plot_entries_exits(
+        prices=prices,
+        trades=trades_df,
+        strategy_name="weather_imbalance_replot",
+        event_slug=event_slug,
+        out_path=plot_path,
+        vwap=vwap,
+        volume=volume,
+        buy_volume=buy_volume_full,
+        sell_volume=sell_volume_full,
+        indicator_series=indicator_signals,
+        indicator_defs=strategy.indicator_defs,
+        max_vwap_slope=strategy.max_vwap_slope,
+        mean_reversion_threshold=strategy.mean_reversion_threshold,
+        signal_magnitude_threshold_imbalance=signal_magnitude_threshold_imbalance,
+        signal_magnitude_threshold_slope=signal_magnitude_threshold_slope,
+        signal_magnitude_threshold_meanrev=signal_magnitude_threshold_meanrev,
+    )
+    t_plot_end = time.perf_counter()
+    if verbose:
+        print(f"Plotting: {t_plot_end - t_plot_start:.2f}s")
+    
+    print(f"Saved replotted figure: {plot_path}")
+    
+    t_total = time.perf_counter() - t0
+    if verbose:
+        print(f"Total replot time: {t_total:.2f}s")
 
 
 def main() -> None:
@@ -47,10 +204,58 @@ def main() -> None:
         default="yes",
         help="Prefer this outcome token when markets are suffixed with __yes/__no",
     )
+    parser.add_argument(
+        "--replot-only",
+        action="store_true",
+        help="Skip backtest and replot a previous result (uses latest if --timestamp not specified)",
+    )
+    parser.add_argument(
+        "--timestamp",
+        type=str,
+        default=None,
+        help="Specific backtest timestamp to replot (e.g. 20260223_155833). Only used with --replot-only.",
+    )
+    parser.add_argument(
+        "--signal-magnitude-imbalance",
+        type=float,
+        default=None,
+        help="Magnitude threshold for volume imbalance signal markers",
+    )
+    parser.add_argument(
+        "--signal-magnitude-slope",
+        type=float,
+        default=None,
+        help="Magnitude threshold for VWAP slope signal markers",
+    )
+    parser.add_argument(
+        "--signal-magnitude-meanrev",
+        type=float,
+        default=None,
+        help="Magnitude threshold for mean-reversion signal markers",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print signal statistics and timing breakdown",
+    )
     args = parser.parse_args()
 
     event_slug = args.event_slug
     resample_rule = f"{args.resample_minutes}min" if args.resample_minutes and args.resample_minutes > 0 else None
+
+    # Handle replot-only mode
+    if args.replot_only:
+        replot_backtest(
+            event_slug=event_slug,
+            timestamp=args.timestamp,
+            resample_minutes=args.resample_minutes,
+            prefer_outcome=args.prefer_outcome,
+            signal_magnitude_threshold_imbalance=args.signal_magnitude_imbalance,
+            signal_magnitude_threshold_slope=args.signal_magnitude_slope,
+            signal_magnitude_threshold_meanrev=args.signal_magnitude_meanrev,
+            verbose=args.verbose,
+        )
+        return
 
     timestamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d_%H%M%S")
     out_dir = RESULTS_DIR / "weather_imbalance_test" / event_slug / timestamp
@@ -64,7 +269,7 @@ def main() -> None:
         print(f"Resample rule: {resample_rule}")
     print("VWAP source: data.zip vwap column")
 
-    prices, vwap, volume, buy_volume, sell_volume = load_event_ohlcv_resampled( # type: ignore
+    prices, vwap, volume, buy_volume, sell_volume, high, low, open_ = load_event_ohlcv_resampled( # type: ignore
         event_slug,
         resample_rule=resample_rule,
         prefer_outcome=args.prefer_outcome,
@@ -73,7 +278,7 @@ def main() -> None:
     # Also load unfiltered matrices (no prefer_outcome) so plotting can
     # access both `__yes` and `__no` outcome columns when available.
     try:
-        _p, _v, _vol, buy_volume_full, sell_volume_full = load_event_ohlcv_resampled(
+        _p, _v, _vol, buy_volume_full, sell_volume_full, _, _, _ = load_event_ohlcv_resampled(
             event_slug,
             resample_rule=resample_rule,
             prefer_outcome=None,
@@ -82,7 +287,14 @@ def main() -> None:
         buy_volume_full = buy_volume
         sell_volume_full = sell_volume
 
-    strategy = WeatherMarketImbalanceStrategy.from_profile(args.profile, vwap=vwap, volume=volume)
+    strategy = WeatherMarketImbalanceStrategy.from_profile(
+        args.profile,
+        vwap=vwap,
+        volume=volume,
+        high=high,
+        low=low,
+        open_=open_,
+    )
     backtester = Backtester(strategy=strategy, rebalance_freq=1)
     started = time.perf_counter()
     result = backtester.run(prices)
@@ -96,6 +308,12 @@ def main() -> None:
     trades_path = out_dir / "trades.csv"
     summary_path = out_dir / "summary.csv"
     plot_path = out_dir / "entries_exits.png"
+    indicator_signals_path = out_dir / "indicator_signals.pkl"
+
+    # Save indicator signals for later replots
+    indicator_signals = result.get("indicator_signals", {})
+    with open(indicator_signals_path, "wb") as f:
+        pickle.dump(indicator_signals, f)
 
     if trades_df.empty:
         pd.DataFrame(
@@ -136,6 +354,9 @@ def main() -> None:
         indicator_defs=strategy.indicator_defs,
         max_vwap_slope=strategy.max_vwap_slope,
         mean_reversion_threshold=strategy.mean_reversion_threshold,
+        signal_magnitude_threshold_imbalance=args.signal_magnitude_imbalance,
+        signal_magnitude_threshold_slope=args.signal_magnitude_slope,
+        signal_magnitude_threshold_meanrev=args.signal_magnitude_meanrev,
     )
 
     summary_row = {

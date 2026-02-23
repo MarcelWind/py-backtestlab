@@ -29,6 +29,56 @@ import numpy as np
 import pandas as pd
 
 
+def _compute_price(
+    close: float,
+    high: float | None = None,
+    low: float | None = None,
+    open_: float | None = None,
+    method: str = "typical",
+) -> float:
+    """Compute price based on pricing method.
+    
+    Parameters
+    ----------
+    close : float
+        Close price (required for all methods).
+    high : float, optional
+        High price (required for 'typical', 'median', 'close_weighted', 'ohlc_avg').
+    low : float, optional
+        Low price (required for 'typical', 'median', 'close_weighted', 'ohlc_avg').
+    open_ : float, optional
+        Open price (required for 'ohlc_avg').
+    method : str
+        Pricing method: 'close', 'median', 'typical', 'close_weighted', 'ohlc_avg'.
+        Default is 'typical' (H+L+C)/3.
+        
+    Returns
+    -------
+    float
+        Computed price.
+    """
+    if method == "close":
+        return close
+    elif method == "median":
+        if high is None or low is None:
+            return close
+        return (high + low) / 2.0
+    elif method == "typical":
+        if high is None or low is None:
+            return close
+        return (high + low + close) / 3.0
+    elif method == "close_weighted":
+        if high is None or low is None:
+            return close
+        return (high + low + 2.0 * close) / 4.0
+    elif method == "ohlc_avg":
+        if high is None or low is None or open_ is None:
+            return close
+        return (open_ + high + low + close) / 4.0
+    else:
+        return close
+
+
 class Indicator(ABC):
     """Abstract base class for all indicators."""
 
@@ -148,22 +198,26 @@ def _transform_slope(raw: float, mode: str, value_per_point: float, scale: float
 # ---------------------------------------------------------------------------
 
 class Vwap(Indicator):
-    """Incremental VWAP indicator computed from close prices and volume.
+    """Incremental VWAP indicator with configurable pricing method.
 
     Computes VWAP = Σ(price × volume) / Σ(volume) over a rolling or expanding
-    window, updating O(1) per bar for the expanding case.
-
-    Other indicators (``VwapSlope``, ``VwapVolumeImbalance``) can reference
-    this instance via their ``vwap_indicator`` parameter instead of receiving
-    a pre-built external VWAP DataFrame.
+    window, updating O(1) per bar for the expanding case. Supports multiple
+    pricing methods (close, median, typical, close_weighted, ohlc_avg).
 
     Parameters
     ----------
     volume:
         Volume DataFrame aligned to prices (same index/columns).
     window_bars:
-        Rolling window in bars.  ``None`` (default) → expanding from bar 0
-        (session / full-history VWAP).
+        Rolling window in bars. ``None`` (default) → expanding from bar 0.
+    pricing_method : str
+        Pricing method: 'close', 'median', 'typical' (default), 'close_weighted', 'ohlc_avg'.
+    high : pd.DataFrame, optional
+        High prices. Required for methods other than 'close'.
+    low : pd.DataFrame, optional
+        Low prices. Required for methods other than 'close'.
+    open_ : pd.DataFrame, optional
+        Open prices. Required for 'ohlc_avg' method.
     """
 
     def __init__(
@@ -172,11 +226,19 @@ class Vwap(Indicator):
         window_bars: int | None = None,
         name: str = "vwap",
         plot_panel: int | None = 0,
+        pricing_method: str = "typical",
+        high: pd.DataFrame | None = None,
+        low: pd.DataFrame | None = None,
+        open_: pd.DataFrame | None = None,
     ) -> None:
         self._volume = volume
         self.window_bars = window_bars
         self._indicator_name = name
         self._plot_panel = plot_panel
+        self.pricing_method = pricing_method
+        self._high = high
+        self._low = low
+        self._open = open_
         self._values: dict[str, list[float]] = {}
         self._ts_lists: dict[str, list] = {}
         # Expanding: scalar running sums.  Rolling: lists of bar-level (p*v, v).
@@ -192,13 +254,37 @@ class Vwap(Indicator):
         ts = prices.index[i]
         for asset in prices.columns:
             try:
-                p = float(prices.iloc[i][asset])
+                close = float(prices.iloc[i][asset])
             except (TypeError, ValueError):
                 continue
-            if not np.isfinite(p):
+            if not np.isfinite(close):
                 continue
             if asset not in self._volume.columns:
                 continue
+            
+            # Extract OHLC for pricing method
+            high = None
+            low = None
+            open_ = None
+            if self._high is not None and asset in self._high.columns:
+                try:
+                    high = float(self._high.iloc[i][asset])
+                except (TypeError, ValueError):
+                    pass
+            if self._low is not None and asset in self._low.columns:
+                try:
+                    low = float(self._low.iloc[i][asset])
+                except (TypeError, ValueError):
+                    pass
+            if self._open is not None and asset in self._open.columns:
+                try:
+                    open_ = float(self._open.iloc[i][asset])
+                except (TypeError, ValueError):
+                    pass
+            
+            # Compute price based on method
+            p = _compute_price(close, high, low, open_, self.pricing_method)
+            
             try:
                 v = float(self._volume.iloc[i][asset])
             except (TypeError, ValueError):
@@ -714,13 +800,35 @@ class SdBands(Indicator):
     Maintains running sum/sum_sq/count per asset for O(1) per-bar updates
     (vs. O(n) per bar in the standalone ``sd_bands_rolling`` function).
     Accumulates the full band history accessible via ``band_series``.
+    
+    Parameters
+    ----------
+    pricing_method : str
+        Pricing method for band computation: 'close', 'median', 'typical' (default),
+        'close_weighted', 'ohlc_avg'.
+    high : pd.DataFrame, optional
+        High prices. Required for methods other than 'close'.
+    low : pd.DataFrame, optional
+        Low prices. Required for methods other than 'close'.
+    open_ : pd.DataFrame, optional
+        Open prices. Required for 'ohlc_avg' method.
     """
 
     @property
     def name(self) -> str:
         return "sd_bands"
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        pricing_method: str = "typical",
+        high: pd.DataFrame | None = None,
+        low: pd.DataFrame | None = None,
+        open_: pd.DataFrame | None = None,
+    ) -> None:
+        self.pricing_method = pricing_method
+        self._high = high
+        self._low = low
+        self._open = open_
         self._sums: dict[str, float] = {}
         self._sum_sqs: dict[str, float] = {}
         self._counts: dict[str, int] = {}
@@ -732,11 +840,35 @@ class SdBands(Indicator):
         ts = prices.index[i]
         for asset in prices.columns:
             try:
-                price = float(prices.iloc[i][asset])
+                close = float(prices.iloc[i][asset])
             except (TypeError, ValueError):
                 continue
-            if not np.isfinite(price):
+            if not np.isfinite(close):
                 continue
+            
+            # Extract OHLC for pricing method
+            high = None
+            low = None
+            open_ = None
+            if self._high is not None and asset in self._high.columns:
+                try:
+                    high = float(self._high.iloc[i][asset])
+                except (TypeError, ValueError):
+                    pass
+            if self._low is not None and asset in self._low.columns:
+                try:
+                    low = float(self._low.iloc[i][asset])
+                except (TypeError, ValueError):
+                    pass
+            if self._open is not None and asset in self._open.columns:
+                try:
+                    open_ = float(self._open.iloc[i][asset])
+                except (TypeError, ValueError):
+                    pass
+            
+            # Compute price based on method
+            price = _compute_price(close, high, low, open_, self.pricing_method)
+            
             self._sums[asset] = self._sums.get(asset, 0.0) + price
             self._sum_sqs[asset] = self._sum_sqs.get(asset, 0.0) + price * price
             self._counts[asset] = self._counts.get(asset, 0) + 1

@@ -1001,7 +1001,7 @@ def draw_price_sd_volume_panel(
         ax_vol_twin = ax.twinx()
         ax_vol_twin.bar(
             vol_s.index, vol_s.values,
-            width=bar_width_days, color="#8B0000", alpha=0.35,
+            width=bar_width_days, color="#FF6347", alpha=0.35,
             align="center", edgecolor="none",
         )
         ax_vol_twin.set_ylabel("vol", fontsize=7)
@@ -1151,11 +1151,11 @@ def draw_trade_markers(ax, market_trades: pd.DataFrame) -> str:
         return "trades=0"
     ax.scatter(
         pd.to_datetime(market_trades["entry_time"]), market_trades["entry_price"],
-        marker="v", s=36, color="#8B0000", zorder=8,
+        marker="v", s=36, color="#FF0000", edgecolors="black", linewidths=0.8, zorder=8,
     )
     ax.scatter(
         pd.to_datetime(market_trades["exit_time"]), market_trades["exit_price"],
-        marker="x", s=40, color="#111111", zorder=9,
+        marker="x", s=40, color="#111111", linewidths=0.8, zorder=9,
     )
     for _, tr in market_trades.iterrows():
         ax.plot(
@@ -1173,7 +1173,10 @@ def draw_volume_imbalance_panel(
     ratio_pct: pd.Series,
     entry_times=None,
     entry_values: np.ndarray | None = None,
+    signal_times=None,
+    signal_values: pd.Series | np.ndarray | None = None,
     lookback_label: int | str = "?",
+    magnitude_threshold: float | None = None,
 ) -> None:
     """Draw volume imbalance % panel.
 
@@ -1187,13 +1190,50 @@ def draw_volume_imbalance_panel(
         Optional trade entry timestamps for scatter markers.
     entry_values:
         Indicator values at entry_times for scatter markers.
+    signal_times:
+        Optional signal timestamps (per rebalance point).
+    signal_values:
+        Signal values at signal_times. Line colored green if > threshold (buy),
+        red if < -threshold (sell), default otherwise.
     lookback_label:
         Rolling lookback for the panel title.
+    magnitude_threshold:
+        Threshold for signal coloring: |value| >= threshold determines color.
     """
-    ax.plot(ratio_pct.index, ratio_pct.values, color="#5A5A5A", linewidth=0.8)
     ax.axhline(0.0, color="#888888", linestyle="--", linewidth=0.7, alpha=0.6)
-    if entry_times is not None and entry_values is not None:
-        ax.scatter(entry_times, entry_values, marker="v", s=22, color="#8B0000", zorder=6)
+    
+    # Plot line with signal-based coloring
+    if signal_times is not None and signal_values is not None:
+        sig_vals = signal_values.to_numpy() if isinstance(signal_values, pd.Series) else signal_values
+        threshold = magnitude_threshold if magnitude_threshold is not None else 0.0
+        
+        # Plot line segments with colors based on signal
+        idx_vals = ratio_pct.index.to_numpy()
+        for i in range(len(idx_vals) - 1):
+            t0, t1 = idx_vals[i], idx_vals[i + 1]
+            y0, y1 = ratio_pct.iloc[i], ratio_pct.iloc[i + 1]
+            
+            # Determine color based on signal at this point
+            if i < len(sig_vals):
+                sig_v = sig_vals[i]
+                if np.isfinite(sig_v):
+                    if sig_v > threshold:
+                        color = "#32CD32"  # Green for buy
+                    elif sig_v < -threshold:
+                        color = "#FF6347"  # Red for sell
+                    else:
+                        color = "#5A5A5A"  # Default for neutral
+                else:
+                    color = "#5A5A5A"
+            else:
+                color = "#5A5A5A"
+            
+            ax.plot([t0, t1], [y0, y1], color=color, linewidth=0.8, zorder=3)
+    else:
+        # No signals, use default color
+        ax.plot(ratio_pct.index, ratio_pct.values, color="#5A5A5A", linewidth=0.8)
+    
+    ax.axhline(0.0, color="#888888", linestyle="--", linewidth=0.7, alpha=0.6)
     ax.set_title(
         f"vol imbalance % (above−below)/total · rolling {lookback_label} bars",
         fontsize=7, loc="left", pad=2,
@@ -1209,10 +1249,13 @@ def draw_vwap_slope_panel(
     slope_series: pd.Series,
     entry_times=None,
     entry_values: np.ndarray | None = None,
+    signal_times=None,
+    signal_values: pd.Series | np.ndarray | None = None,
     threshold: float | None = None,
     mode_label: str = "raw",
     lookback_label: int | str = "?",
     update_pct: float = 0.0,
+    magnitude_threshold: float | None = None,
 ) -> None:
     """Draw VWAP slope panel with symlog y-axis.
 
@@ -1226,6 +1269,10 @@ def draw_vwap_slope_panel(
         Optional trade entry timestamps.
     entry_values:
         Slope values at entry_times.
+    signal_times:
+        Optional signal timestamps (per rebalance point).
+    signal_values:
+        Signal values at signal_times. Line colored green if > threshold (buy), red if < -threshold (sell).
     threshold:
         Optional threshold drawn as a red dashed hline.
     mode_label:
@@ -1234,16 +1281,49 @@ def draw_vwap_slope_panel(
         Lookback bars for the title.
     update_pct:
         Fraction of bars with valid VWAP+volume data (for title).
+    magnitude_threshold:
+        Threshold for signal line coloring: line colored green if value > threshold, red if value < -threshold.
     """
     slope_display = slope_series.ffill()
     ax.plot(slope_display.index, slope_display.values, color="#708090", linewidth=0.9,
             alpha=0.55, linestyle="--")
-    ax.plot(slope_series.index, slope_series.values, color="#2F4F4F", linewidth=1.1)
+    
+    # Plot line with signal-based coloring
+    if signal_times is not None and signal_values is not None:
+        sig_vals = signal_values.to_numpy() if isinstance(signal_values, pd.Series) else signal_values
+        sig_threshold = magnitude_threshold if magnitude_threshold is not None else 0.0
+        
+        # Plot line segments with colors based on signal
+        idx_vals = slope_series.index.to_numpy()
+        for i in range(len(idx_vals) - 1):
+            t0, t1 = idx_vals[i], idx_vals[i + 1]
+            y0, y1 = slope_series.iloc[i], slope_series.iloc[i + 1]
+            
+            # Determine color based on signal at this point
+            if i < len(sig_vals):
+                sig_v = sig_vals[i]
+                if np.isfinite(sig_v):
+                    if sig_v > sig_threshold:
+                        color = "#006400"  # Green for buy
+                    elif sig_v < -sig_threshold:
+                        color = "#8B0000"  # Red for sell
+                    else:
+                        color = "#2F4F4F"  # Default for neutral
+                else:
+                    color = "#2F4F4F"
+            else:
+                color = "#2F4F4F"
+            
+            ax.plot([t0, t1], [y0, y1], color=color, linewidth=1.1, zorder=3)
+    else:
+        # No signals, use default color
+        ax.plot(slope_series.index, slope_series.values, color="#2F4F4F", linewidth=1.1)
+    
     ax.axhline(0.0, color="#888888", linestyle="--", linewidth=0.9, alpha=0.8)
     if threshold is not None:
-        ax.axhline(float(threshold), color="#8B0000", linestyle=":", linewidth=1.0, alpha=0.9)
+        ax.axhline(float(threshold), color="#FF0000", linestyle=":", linewidth=1.0, alpha=0.9)
     if entry_times is not None and entry_values is not None:
-        ax.scatter(entry_times, entry_values, marker="v", s=24, color="#8B0000", zorder=6)
+        ax.scatter(entry_times, entry_values, marker="v", s=24, color="#FF0000", edgecolors="black", linewidths=0.7, zorder=6)
 
     slope_vals = slope_series.to_numpy(dtype=float)
     finite_vals = slope_vals[np.isfinite(slope_vals)]
@@ -1280,8 +1360,11 @@ def draw_mean_reversion_panel(
     mr_score: pd.Series,
     entry_times=None,
     entry_values: np.ndarray | None = None,
+    signal_times=None,
+    signal_values: pd.Series | np.ndarray | None = None,
     threshold: float | None = 0.5,
     window_label: int | str = "?",
+    magnitude_threshold: float | None = None,
 ) -> None:
     """Draw mean-reversion score panel.
 
@@ -1295,17 +1378,53 @@ def draw_mean_reversion_panel(
         Optional trade entry timestamps.
     entry_values:
         Score values at entry_times.
+    signal_times:
+        Optional signal timestamps (per rebalance point).
+    signal_values:
+        Signal values at signal_times. Line colored green if >= baseline + threshold (buy), red if <= baseline - threshold (sell).
     threshold:
         Optional threshold drawn as a red dotted hline.
     window_label:
         Rolling window for the title.
+    magnitude_threshold:
+        Threshold for signal line coloring around baseline: line colored green if value >= baseline + threshold, red if value <= baseline - threshold.
     """
     ax.plot(mr_score.index, mr_score.values, color="#7A5C00", linewidth=1.1)
     if threshold is not None:
-        ax.axhline(float(threshold), color="#8B0000", linestyle=":", linewidth=1.0, alpha=0.9)
+        ax.axhline(float(threshold), color="#FF0000", linestyle=":", linewidth=1.0, alpha=0.9)
     ax.axhline(0.0, color="#888888", linestyle="--", linewidth=0.9, alpha=0.6)
+    
+    # Plot line with signal-based coloring
+    if signal_times is not None and signal_values is not None:
+        sig_vals = signal_values.to_numpy() if isinstance(signal_values, pd.Series) else signal_values
+        baseline = float(threshold) if threshold is not None else 0.5
+        sig_threshold = magnitude_threshold if magnitude_threshold is not None else 0.0
+        
+        # Plot line segments with colors based on signal
+        idx_vals = mr_score.index.to_numpy()
+        for i in range(len(idx_vals) - 1):
+            t0, t1 = idx_vals[i], idx_vals[i + 1]
+            y0, y1 = mr_score.iloc[i], mr_score.iloc[i + 1]
+            
+            # Determine color based on signal at this point
+            if i < len(sig_vals):
+                sig_v = sig_vals[i]
+                if np.isfinite(sig_v):
+                    if sig_v >= baseline + sig_threshold:
+                        color = "#006400"  # Green for strong buy
+                    elif sig_v <= baseline - sig_threshold:
+                        color = "#8B0000"  # Red for strong sell
+                    else:
+                        color = "#7A5C00"  # Default for neutral
+                else:
+                    color = "#7A5C00"
+            else:
+                color = "#7A5C00"
+            
+            ax.plot([t0, t1], [y0, y1], color=color, linewidth=1.1, zorder=3)
+    
     if entry_times is not None and entry_values is not None:
-        ax.scatter(entry_times, entry_values, marker="v", s=22, color="#8B0000", zorder=6)
+        ax.scatter(entry_times, entry_values, marker="v", s=22, color="#FF0000", edgecolors="black", linewidths=0.7, zorder=6)
     ax.set_ylim(-0.02, 1.02)
     ax.set_title(
         f"mean-rev score · window={window_label} · thr={threshold if threshold is not None else 'n/a'}",

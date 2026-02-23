@@ -37,7 +37,12 @@ class Backtester:
             prices: DataFrame of close prices (rows=dates, cols=assets)
 
         Returns:
-            Dict with portfolio returns, weights history, and metrics
+            Dict with keys:
+            - 'returns': Portfolio returns series aligned to rebalance dates
+            - 'weights': Weights history as DataFrame (n_rebalances, n_assets)
+            - 'metrics': Performance metrics dict (sharpe, total_return, etc)
+            - 'indicator_signals': Dict mapping indicator name to DataFrame of 
+              per-rebalance, per-asset signals (n_rebalances, n_assets)
         """
         returns = compute_returns(prices)
         n_days = len(returns)
@@ -72,6 +77,7 @@ class Backtester:
             "returns": portfolio_returns,
             "weights": weights_df,
             "metrics": compute_metrics(portfolio_returns),
+            "indicator_signals": self.strategy.indicator_series,
         }
 
 
