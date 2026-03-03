@@ -1446,3 +1446,63 @@ def volume_profile(
     hist, _ = np.histogram(p_valid, bins=edges, weights=w_valid)
     centers = (edges[:-1] + edges[1:]) / 2.0
     return centers, hist.astype(float)
+
+
+
+class CumulativeVolumeDelta(Indicator):
+    """Per-asset cumulative signed-volume delta indicator.
+
+    This indicator accepts a `volume` DataFrame of signed volumes (positive
+    for net buys, negative for net sells) and computes the cumulative sum per
+    asset incrementally. The indicator returns a ``pd.Series`` of the current
+    cumulative delta for each asset when ``compute`` is called.
+
+    Parameters
+    ----------
+    volume:
+        Volume DataFrame aligned to prices (rows=timestamps, cols=assets). If
+        an asset is missing from `volume`, it will not appear in the output
+        (or will yield NaN if absent entirely).
+    name:
+        Indicator name key stored in the strategy's `indicators` map.
+    plot_panel:
+        Optional plotting panel index.
+    """
+
+    def __init__(self, volume: pd.DataFrame, name: str = "cum_vol_delta", plot_panel: int | None = None) -> None:
+        self._volume = volume if volume is not None else pd.DataFrame()
+        self._indicator_name = name
+        self._plot_panel = plot_panel
+        self._history: dict[str, list[float]] = {}
+        self._ts_lists: dict[str, list] = {}
+        self._next_bar: int = -1
+
+    @property
+    def name(self) -> str:
+        return self._indicator_name
+
+    def _process_bar(self, prices: pd.DataFrame, i: int) -> None:
+        ts = prices.index[i]
+        for asset in prices.columns:
+            if asset not in self._volume.columns:
+                # treat missing asset in volume as no data
+                continue
+            try:
+                v = float(self._volume.iloc[i][asset])
+            except (TypeError, ValueError, IndexError):
+                v = 0.0
+            if not np.isfinite(v):
+                v = 0.0
+            prev = self._history.get(asset, [0.0])[-1] if self._history.get(asset) else 0.0
+            cur = prev + v
+            self._history.setdefault(asset, []).append(cur)
+            self._ts_lists.setdefault(asset, []).append(ts)
+
+    def compute(self, prices: pd.DataFrame, returns: pd.DataFrame, index: int) -> pd.Series:
+        if self._next_bar < 0:
+            self._next_bar = 0
+        for i in range(self._next_bar, index + 1):
+            self._process_bar(prices, i)
+        self._next_bar = index + 1
+        result = {a: (self._history[a][-1] if a in self._history and self._history[a] else float("nan")) for a in prices.columns}
+        return pd.Series(result, dtype=float)

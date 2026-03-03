@@ -1244,6 +1244,7 @@ def draw_volume_imbalance_panel(
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m %H:%M'))
 
 
+
 def draw_vwap_slope_panel(
     ax,
     slope_series: pd.Series,
@@ -1434,3 +1435,60 @@ def draw_mean_reversion_panel(
     ax.tick_params(axis="y", labelsize=7)
     ax.grid(alpha=0.25)
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m %H:%M'))
+
+
+def draw_cumulative_volume_delta_panel(
+    ax,
+    delta_series: pd.Series | None,
+    bar_width_days: float = 15.0 / 1440.0,
+    xlim=None,
+    title: str | None = None,
+    up_label: str = "▲ positive",
+    dn_label: str = "▼ negative",
+    cum_color: str = "#00008B",
+) -> None:
+    """Draw a general cumulative volume-delta panel (bars + cumulative line).
+
+    This is a general-purpose CVD drawer and does not assume any yes/no
+    prediction-market token naming. Pass a precomputed delta series (signed
+    volume per bar). If ``delta_series`` is ``None`` or empty the axes will
+    display a passive message and be turned off.
+    """
+    if delta_series is None or len(delta_series.dropna()) == 0:
+        ax.text(0.5, 0.5, "No volume delta data", ha="center", va="center", fontsize=8)
+        ax.set_axis_off()
+        return
+
+    delta = delta_series.reindex(delta_series.index).fillna(0.0)
+    colors = ["#00FF00" if v >= 0 else "#FF0000" for v in delta.values]
+    ax.bar(delta.index, delta.values, width=bar_width_days, color=colors,
+           alpha=0.75, align="center", edgecolor="none")
+
+    ttitle = title if title is not None else "vol Δ (signed)"
+    ax.set_title(f"{ttitle}  |  line = cumulative Δ", fontsize=7, loc="left", pad=2)
+    ax.tick_params(axis="x", rotation=45, labelsize=7)
+    ax.tick_params(axis="y", labelsize=7)
+    ax.grid(alpha=0.18)
+    ax.axhline(0.0, color="#888888", linestyle="-", linewidth=0.8, alpha=0.6, zorder=1)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%d-%m %H:%M'))
+    if xlim is not None:
+        try:
+            ax.set_xlim(xlim)
+        except Exception:
+            pass
+
+    ax.text(0.01, 0.97, up_label, transform=ax.transAxes, fontsize=7,
+            va="top", ha="left", color="#00FF00", alpha=0.85)
+    ax.text(0.01, 0.03, dn_label, transform=ax.transAxes, fontsize=7,
+            va="bottom", ha="left", color="#FF0000", alpha=0.85)
+
+    cum_delta = delta.cumsum()
+    if len(cum_delta) > 0:
+        cum_delta = cum_delta - cum_delta.iloc[0]
+
+    ax_cum = ax.twinx()
+    ax_cum.plot(cum_delta.index, cum_delta.values, color=cum_color,
+                linewidth=1.4, alpha=0.85, zorder=5)
+    ax_cum.axhline(0.0, color=cum_color, linestyle=":", linewidth=0.7, alpha=0.4, zorder=1)
+    ax_cum.tick_params(axis="y", labelsize=7, labelcolor=cum_color)
+    ax_cum.set_ylabel("cum Δ", fontsize=7, color=cum_color)
