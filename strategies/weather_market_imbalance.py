@@ -1,82 +1,31 @@
+import json
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from typing import Any, cast
 
 from stratlab.strategy.base import Strategy
 from stratlab.strategy.indicators import BandPosition, MeanReversion, SdBands, Vwap, VwapSlope, VwapVolumeImbalance
 
 
-PROFILE_PRESETS: dict[str, dict[str, object]] = {
-    # Conservative = fewer but stronger signals.
-    # - Longer lookback, stricter imbalance thresholds, stricter VWAP down-slope gate.
-    # - Good when you want cleaner entries and can tolerate lower trade count.
-    "conservative": {
-        "lookback_hours": 12.0,
-        "max_concurrent_positions": None,
-        "imbalance_below_1sd_threshold": 40.0,
-        "imbalance_down_above_mean_cap": 35.0,
-        "mean_reversion_window": 8,
-        "mean_reversion_threshold": 0.55,
-        "balanced_within_1sd_threshold": 75.0,
-        "use_vwap_slope_filter": True,
-        "use_vwap_volume_imbalance_filter": True,
-        "max_vwap_volume_imbalance_pct": -1.0,
-        "vwap_volume_imbalance_lookback": 30,
-        "vwap_slope_mode": "scaled",
-        "vwap_slope_value_per_point": 1e-4,
-        "vwap_slope_scale": 1.0,
-        "vwap_slope_lookback": 30,
-        "max_vwap_slope": -1.0,
-        "take_profit": 0.35,
-        "stop_loss": 0.12,
-    },
-    # Balanced = default test profile.
-    # - Medium lookback and medium thresholds.
-    # - Reasonable trade frequency with moderate strictness.
-    "balanced": {
-        "lookback_hours": 6.0,
-        "max_concurrent_positions": None,
-        "imbalance_below_1sd_threshold": 40.0,
-        "imbalance_down_above_mean_cap": 10.0,
-        "mean_reversion_window": 5,
-        "mean_reversion_threshold": 0.5,
-        "balanced_within_1sd_threshold": 70.0,
-        "use_vwap_slope_filter": True,
-        "use_vwap_volume_imbalance_filter": True,
-        "max_vwap_volume_imbalance_pct": -1.0,
-        "vwap_volume_imbalance_lookback": 60,
-        "vwap_slope_mode": "scaled",
-        "vwap_slope_value_per_point": 1e-3,
-        "vwap_slope_scale": 1.0,
-        "vwap_slope_lookback": 60,
-        "max_vwap_slope": -0.5,
-        "take_profit": 0.5,
-        "stop_loss": 0.20,
-    },
-    # Aggressive = fastest/loosest entries.
-    # - Short lookback, looser imbalance thresholds, permissive slope gate.
-    # - Higher trade count, typically noisier entries.
-    "aggressive": {
-        "lookback_hours": 3.0,
-        "max_concurrent_positions": None,
-        "imbalance_below_1sd_threshold": 40.0,
-        "imbalance_down_above_mean_cap": 30.0,
-        "mean_reversion_window": 3,
-        "mean_reversion_threshold": 0.45,
-        "balanced_within_1sd_threshold": 65.0,
-        "use_vwap_slope_filter": True,
-        "use_vwap_volume_imbalance_filter": True,
-        "max_vwap_volume_imbalance_pct": -1.0,
-        "vwap_volume_imbalance_lookback": 20,
-        "vwap_slope_mode": "scaled",
-        "vwap_slope_value_per_point": 1e-4,
-        "vwap_slope_scale": 1.0,
-        "vwap_slope_lookback": 15,
-        "max_vwap_slope": -0.18,
-        "take_profit": 0.25,
-        "stop_loss": 0.25,
-    },
-}
+# configuration file that holds the profile presets in JSON format
+_PRESETS_PATH = Path(__file__).with_name("weather_market_imbalance_presets.json")
+
+
+def _load_profile_presets() -> dict[str, dict[str, object]]:
+    """Read available trading profiles from the external JSON file.
+
+    Falling back to an empty dict if the file cannot be read keeps the module
+    importable for tools that only need the class definitions.
+    """
+    try:
+        text = _PRESETS_PATH.read_text()
+        return json.loads(text)
+    except FileNotFoundError:
+        return {}
+
+
+PROFILE_PRESETS: dict[str, dict[str, object]] = _load_profile_presets()
 
 
 class WeatherMarketImbalanceStrategy(Strategy):
@@ -90,6 +39,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
         self,
         lookback: int = 1,
         lookback_hours: float | None = 6.0,
+        use_market_regime: bool = True,
         allow_cash: bool = True,
         entry_regime: str = "Imb. Down",
         exit_mode: str = "hold_to_end",
@@ -163,6 +113,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
         """
         self.lookback = int(lookback)
         self.lookback_hours = lookback_hours
+        self.use_market_regime = bool(use_market_regime)
         self.allow_cash = allow_cash
         self.entry_regime = entry_regime
         self.exit_mode = exit_mode
@@ -451,13 +402,19 @@ class WeatherMarketImbalanceStrategy(Strategy):
             start = max(0, index - self.lookback + 1)
 
         for asset in assets:
-            asset_window = prices.iloc[start: index + 1][asset].dropna().to_numpy(dtype=float)
+            asset_window = prices.iloc[start : index + 1][asset].dropna().to_numpy(dtype=float)
             if len(asset_window) < max(2, self.lookback // 2):
                 continue
 
-            regime, confidence = self._classify_regime(asset)
-            if regime != self.entry_regime:
-                continue
+            if self.use_market_regime:
+                regime, confidence = self._classify_regime(asset)
+                if regime != self.entry_regime:
+                    continue
+            else:
+                # market‑regime filtering disabled – allow everything through
+                # still supply a confidence for ranking purposes
+                regime = self.entry_regime
+                confidence = 0.5
 
             slope = 0.0
             raw_slope = 0.0

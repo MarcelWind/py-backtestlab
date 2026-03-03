@@ -18,7 +18,7 @@ ticker = "META"
 period = "30d"
 interval = "1h"
 
-OUT = Path("results") / f"{ticker.lower()}_{interval}_{period}_cvd_test.png"
+OUT = Path("test") / f"{ticker.lower()}_{interval}_{period}_cvd_test.png"
 OUT.parent.mkdir(parents=True, exist_ok=True)
 
 print(f"Downloading {ticker} {period} {interval}...")
