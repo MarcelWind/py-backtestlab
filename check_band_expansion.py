@@ -29,6 +29,8 @@ def check_band_expansion():
         high=high,
         low=low,
         open_=open_,
+        buy_volume=buy_volume,
+        sell_volume=sell_volume,
     )
     
     sdbands_ind = None

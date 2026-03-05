@@ -25,6 +25,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+import re
 import numpy as np
 import pandas as pd
 
@@ -191,6 +192,93 @@ def _transform_slope(raw: float, mode: str, value_per_point: float, scale: float
     if mode == "angle":
         return float(np.degrees(np.arctan(normalized)) * scale)
     raise ValueError(f"Unsupported vwap_slope_mode={mode!r}")
+
+
+# ---------------------------------------------------------------------------
+# Yes/No cumulative delta helpers
+# ---------------------------------------------------------------------------
+
+# regular expression used to detect __yes/__no suffixes in column names
+_SUFFIX_RE = re.compile(r"^(.*)__(yes|no)$", re.IGNORECASE)
+
+
+def select_yes_no_columns(volume_df: pd.DataFrame | None, base: str, market_str: str, suffix_re=_SUFFIX_RE):
+    """Return (no_col, yes_col) column names from volume_df for the given base market name.
+
+    Mirrors the selection logic originally defined in the strategy module so
+    indicator code can resolve paired yes/no columns reliably.
+    """
+    if volume_df is None:
+        return None, None
+    col_list = [str(c) for c in volume_df.columns]
+    cand_no = None
+    cand_yes = None
+    exact_no = f"{base}__no"
+    exact_yes = f"{base}__yes"
+    if exact_no in col_list:
+        cand_no = exact_no
+    if exact_yes in col_list:
+        cand_yes = exact_yes
+    if cand_no is None:
+        for c in col_list:
+            if c.lower().startswith(base.lower()) and c.lower().endswith("__no"):
+                cand_no = c
+                break
+    if cand_yes is None:
+        for c in col_list:
+            if c.lower().startswith(base.lower()) and c.lower().endswith("__yes"):
+                cand_yes = c
+                break
+    if (cand_no is None or cand_yes is None) and base in col_list:
+        m_m = suffix_re.match(market_str)
+        if m_m:
+            suffix = m_m.group(2).lower()
+            if suffix == "no":
+                cand_no = cand_no or base
+            elif suffix == "yes":
+                cand_yes = cand_yes or base
+    return cand_no, cand_yes
+
+
+def cumulative_yes_no_delta(
+    volume_df: pd.DataFrame | None,
+    cache: dict[str, tuple[str | None, str | None]],
+    asset: str,
+    prices: pd.DataFrame,
+    index: int,
+    suffix_re=_SUFFIX_RE,
+) -> float:
+    """Return cumulative yes-minus-no delta for one volume matrix/asset.
+
+    The returned value is the running sum of (yes - no) from the beginning
+    of ``prices`` through ``index``. The series is baseline-shifted so the
+    first available bar is always zero.
+    """
+    if volume_df is None or volume_df.empty:
+        return float("nan")
+
+    m = suffix_re.match(asset)
+    base = m.group(1) if m else asset
+
+    no_col, yes_col = cache.get(asset, (None, None))
+    if no_col is None or yes_col is None:
+        no_col, yes_col = select_yes_no_columns(volume_df, base, asset, suffix_re)
+        cache[asset] = (no_col, yes_col)
+
+    if yes_col is None or no_col is None:
+        return float("nan")
+
+    yes_series = volume_df[yes_col].reindex(prices.index).fillna(0.0)
+    no_series = volume_df[no_col].reindex(prices.index).fillna(0.0)
+    delta_series = yes_series - no_series
+    cum = delta_series.cumsum()
+    if cum.empty:
+        return float("nan")
+    baseline = float(cum.iloc[0])
+    try:
+        return float(cum.iloc[index] - baseline)
+    except Exception:
+        return float("nan")
 
 
 # ---------------------------------------------------------------------------

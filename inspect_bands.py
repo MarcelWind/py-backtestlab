@@ -38,6 +38,8 @@ def inspect_band_data():
         high=high,
         low=low,
         open_=open_,
+        buy_volume=buy_volume,
+        sell_volume=sell_volume,
     )
     
     # Find SdBands in indicator_defs

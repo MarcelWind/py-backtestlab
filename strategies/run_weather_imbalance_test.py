@@ -11,6 +11,7 @@ import json
 import time
 import pickle
 import pandas as pd
+# import logging
 
 # Ensure project root is importable when running this file directly.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -115,13 +116,15 @@ def replot_backtest(
     resample_rule = f"{resample_minutes}min" if resample_minutes and resample_minutes > 0 else None
     
     t_load_start = time.perf_counter()
+
+    # For strategy, single preferred outcome to operate on
     prices, vwap, volume, buy_volume, sell_volume, high, low, open_ = load_event_ohlcv_resampled(
         event_slug,
         resample_rule=resample_rule,
         prefer_outcome=prefer_outcome,
     )
 
-    # Load unfiltered matrices for plotting
+    # For plotting, load unfiltered matrices 
     try:
         _p, _v, _vol, buy_volume_full, sell_volume_full, _, _, _ = load_event_ohlcv_resampled(
             event_slug,
@@ -144,6 +147,8 @@ def replot_backtest(
         high=high,
         low=low,
         open_=open_,
+        buy_volume=buy_volume_full,
+        sell_volume=sell_volume_full,
     )
     
     # Generate new plot with same data but possibly different visualization params
@@ -180,6 +185,13 @@ def replot_backtest(
 
 
 def main() -> None:
+    # configure basic logging.  INFO level is usually sufficient; set
+    # the strategy logger itself to DEBUG if deeper inspection is required.
+    # logging.basicConfig(level=logging.INFO)
+    # logging.getLogger("strategies.weather_market_imbalance").setLevel(logging.DEBUG)
+    # suppress verbose debug from third-party libraries (matplotlib fonts, etc.)
+    # logging.getLogger("matplotlib").setLevel(logging.WARNING)
+
     parser = argparse.ArgumentParser(description="Run single-event weather imbalance smoke test")
     parser.add_argument(
         "--profile",
@@ -269,7 +281,7 @@ def main() -> None:
         print(f"Resample rule: {resample_rule}")
     print("VWAP source: data.zip vwap column")
 
-    prices, vwap, volume, buy_volume, sell_volume, high, low, open_ = load_event_ohlcv_resampled( # type: ignore
+    prices, vwap, volume, buy_volume, sell_volume, high, low, open_ = load_event_ohlcv_resampled(
         event_slug,
         resample_rule=resample_rule,
         prefer_outcome=args.prefer_outcome,
@@ -281,7 +293,7 @@ def main() -> None:
         _p, _v, _vol, buy_volume_full, sell_volume_full, _, _, _ = load_event_ohlcv_resampled(
             event_slug,
             resample_rule=resample_rule,
-            prefer_outcome=None,
+            prefer_outcome=None,  # this may filter out some columns, but try to respect the user's preference if possible
         )
     except Exception:
         buy_volume_full = buy_volume
@@ -294,6 +306,8 @@ def main() -> None:
         high=high,
         low=low,
         open_=open_,
+        buy_volume=buy_volume_full,
+        sell_volume=sell_volume_full,
     )
     backtester = Backtester(strategy=strategy, rebalance_freq=1)
     started = time.perf_counter()
@@ -332,6 +346,8 @@ def main() -> None:
                 "vwap_slope",
                 "vwap_slope_raw",
                 "vwap_volume_imbalance_pct",
+                "buy_cvd",
+                "sell_cvd",
             ]
         ).to_csv(trades_path, index=False)
     else:

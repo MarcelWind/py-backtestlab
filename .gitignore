@@ -231,3 +231,6 @@ data/
 
 # Apple filesystem
 .DS_Store
+
+# Debugger
+.vscode/launch.json

@@ -3,9 +3,22 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Any, cast
+import math
+import logging as logger
 
 from stratlab.strategy.base import Strategy
-from stratlab.strategy.indicators import BandPosition, MeanReversion, SdBands, Vwap, VwapSlope, VwapVolumeImbalance
+from stratlab.strategy.indicators import (
+    BandPosition,
+    MeanReversion,
+    SdBands,
+    Vwap,
+    VwapSlope,
+    VwapVolumeImbalance,
+    cumulative_yes_no_delta,
+)
+
+
+# cumulative yes/no delta helpers moved to stratlab.strategy.indicators
 
 
 # configuration file that holds the profile presets in JSON format
@@ -69,6 +82,12 @@ class WeatherMarketImbalanceStrategy(Strategy):
         vwap_slope_scale: float = 1.0,
         vwap_slope_lookback: int = 15, # in bars, not hours; should be less than lookback if lookback_hours is set
         max_vwap_slope: float = -2.0,
+        buy_volume: pd.DataFrame | None = None,
+        sell_volume: pd.DataFrame | None = None,
+        use_buy_cvd_filter: bool = True,
+        max_buy_cvd_for_short: float = 0.0,
+        use_sell_cvd_filter: bool = True,
+        min_sell_cvd_for_short: float = 0.0,
     ):
         """Initialize the weather imbalance strategy.
 
@@ -95,6 +114,20 @@ class WeatherMarketImbalanceStrategy(Strategy):
             Example: 50 means skip entries when above-VWAP volume dominates too much.
         - vwap_volume_imbalance_lookback: Lookback in UPDATE BARS for imbalance.
             If None, uses vwap_slope_lookback.
+
+        Buy-volume delta filter:
+        - buy_volume: optional DataFrame containing per-bar "yes" and "no"
+            buy-volume columns (e.g. "market__yes"/"market__no").
+        - use_buy_cvd_filter / max_buy_cvd_for_long: optional negative-cumulative
+            buy CVD gate for shorts, requiring cumulative (yes - no) to be below
+            the configured threshold.
+
+        Sell-volume delta filter:
+        - sell_volume: optional DataFrame containing per-bar "yes" and "no"
+            sell-volume columns (e.g. "market__yes"/"market__no").
+        - use_sell_cvd_filter / min_sell_cvd_for_short: optional positive-cumulative
+            sell CVD gate for shorts, requiring cumulative (yes - no) to be above
+            the configured threshold.
 
         Regime behavior (classification boundaries):
         - imbalance_above_mean_threshold / imbalance_above_1sd_threshold:
@@ -130,6 +163,21 @@ class WeatherMarketImbalanceStrategy(Strategy):
         self.balanced_within_1sd_threshold = float(balanced_within_1sd_threshold)
         self.mean_reversion_threshold = float(mean_reversion_threshold)
 
+        self.buy_volume = buy_volume if buy_volume is not None else pd.DataFrame()
+        self.sell_volume = sell_volume if sell_volume is not None else pd.DataFrame()
+        self._buy_delta_cache: dict[str, tuple[str | None, str | None]] = {}
+        self._sell_delta_cache: dict[str, tuple[str | None, str | None]] = {}
+
+        # history of (index, asset, delta) whenever ``_buy_delta`` is called
+        # during weight generation; useful for tests and debugging.
+        self.buy_delta_history: list[tuple[int, str, float]] = []
+        self.sell_delta_history: list[tuple[int, str, float]] = []
+
+        self.use_buy_cvd_filter = bool(use_buy_cvd_filter)
+        self.max_buy_cvd_for_short = float(max_buy_cvd_for_short)
+        self.use_sell_cvd_filter = bool(use_sell_cvd_filter)
+        self.min_sell_cvd_for_short = float(min_sell_cvd_for_short)
+
         self.use_vwap_slope_filter = bool(use_vwap_slope_filter)
         self.use_vwap_volume_imbalance_filter = bool(use_vwap_volume_imbalance_filter)
         self.max_vwap_volume_imbalance_pct = float(max_vwap_volume_imbalance_pct)
@@ -145,15 +193,13 @@ class WeatherMarketImbalanceStrategy(Strategy):
             self.vwap_volume_imbalance_lookback = int(vwap_volume_imbalance_lookback)
         self.max_vwap_slope = float(max_vwap_slope)
 
-        self._positions: dict[str, dict[str, object]] = {}
-        self.trade_log: list[dict[str, object]] = []
-
+        # *** indicator definitions belong in __init__, not _buy_delta ***
         _vwap = vwap if vwap is not None else pd.DataFrame()
         _volume = volume if volume is not None else pd.DataFrame()
         _high = high
         _low = low
         _open = open_
-        
+
         _sd_bands = SdBands(
             pricing_method=pricing_method,
             high=_high,
@@ -204,6 +250,41 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 lookback_bars=int(lookback) if lookback_hours is None else None,
             ),
         ]
+
+        self._positions: dict[str, dict[str, object]] = {}
+        self.trade_log: list[dict[str, object]] = []
+
+
+    def _buy_delta(self, asset: str, prices: pd.DataFrame, index: int) -> float:
+        """Return **cumulative** yes-minus-no buy-volume delta for *asset*.
+
+        The returned value is the running sum of (yes - no) from the beginning
+        of ``prices`` through ``index``.  The series is shifted so that the
+        first available bar always returns zero — this mirrors the behaviour of
+        the plotting helper which subtracts ``cum_delta.iloc[0]`` when
+        drawing the blue line.
+
+        If the necessary columns cannot be resolved or the value is missing,
+        ``nan`` is returned.  The expensive column lookup is cached by asset
+        name so repeated calls are cheap.
+        """
+        return cumulative_yes_no_delta(
+            volume_df=self.buy_volume,
+            cache=self._buy_delta_cache,
+            asset=asset,
+            prices=prices,
+            index=index,
+        )
+
+    def _sell_delta(self, asset: str, prices: pd.DataFrame, index: int) -> float:
+        """Return **cumulative** yes-minus-no sell-volume delta for *asset*."""
+        return cumulative_yes_no_delta(
+            volume_df=self.sell_volume,
+            cache=self._sell_delta_cache,
+            asset=asset,
+            prices=prices,
+            index=index,
+        )
 
     @classmethod
     def available_profiles(cls) -> list[str]:
@@ -303,6 +384,8 @@ class WeatherMarketImbalanceStrategy(Strategy):
         vwap_slope = float(cast(float, position.get("vwap_slope", 0.0)))
         vwap_slope_raw = float(cast(float, position.get("vwap_slope_raw", 0.0)))
         vwap_volume_imbalance_pct = float(cast(float, position.get("vwap_volume_imbalance_pct", float("nan"))))
+        buy_cvd = float(cast(float, position.get("buy_cvd", float("nan"))))
+        sell_cvd = float(cast(float, position.get("sell_cvd", float("nan"))))
         pnl = self._short_trade_return(entry_price, current_price)
         self.trade_log.append(
             {
@@ -320,6 +403,8 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 "vwap_slope": vwap_slope,
                 "vwap_slope_raw": vwap_slope_raw,
                 "vwap_volume_imbalance_pct": vwap_volume_imbalance_pct,
+                "buy_cvd": buy_cvd,
+                "sell_cvd": sell_cvd,
             }
         )
         self._positions.pop(asset, None)
@@ -389,24 +474,36 @@ class WeatherMarketImbalanceStrategy(Strategy):
 
         # Entry checks on all assets
         ranked_entries: list[tuple[str, float, float, float, float]] = []
+        # compute the window start used for market-regime and other indicators
+        # but *do not* bail out early; we still want to observe buy-volume
+        # delta on every bar.  previously the lookback logic returned before any
+        # deltas were recorded, which delayed entries until the window filled.
         if self.lookback_hours is not None:
             start_ts = current_ts - pd.Timedelta(hours=float(self.lookback_hours))
             index_series = pd.DatetimeIndex(prices.index)
             start = int(index_series.searchsorted(start_ts, side="left"))
-            if start >= index:
-                return np.zeros(len(assets), dtype=float)
-            # Require full lookback horizon before allowing entries.
-            if pd.Timestamp(prices.index[start]) > start_ts:
-                return np.zeros(len(assets), dtype=float)
+            # determine whether the regime window is complete
+            need_full_window = start >= index or pd.Timestamp(prices.index[start]) > start_ts
         else:
             start = max(0, index - self.lookback + 1)
+            need_full_window = False
 
         for asset in assets:
+            # compute delta immediately; always record history so that we
+            # know when CVD first turns negative regardless of lookback.
+            buy_delta = self._buy_delta(asset, prices, index)
+            sell_delta = self._sell_delta(asset, prices, index)
+            self.buy_delta_history.append((index, asset, buy_delta))
+            self.sell_delta_history.append((index, asset, sell_delta))
+
             asset_window = prices.iloc[start : index + 1][asset].dropna().to_numpy(dtype=float)
             if len(asset_window) < max(2, self.lookback // 2):
                 continue
 
             if self.use_market_regime:
+                # if the regime window isn't yet complete, skip asset entirely
+                if need_full_window:
+                    continue
                 regime, confidence = self._classify_regime(asset)
                 if regime != self.entry_regime:
                     continue
@@ -430,6 +527,29 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 if np.isnan(imbalance_pct) or imbalance_pct > self.max_vwap_volume_imbalance_pct:
                     continue
 
+            if self.use_buy_cvd_filter:
+                if (not math.isfinite(buy_delta)) or buy_delta >= self.max_buy_cvd_for_short:
+                    logger.debug(
+                        "%s @ %s: buy CVD = %s must be < max_buy_cvd_for_short=%s – skipping",
+                        asset,
+                        current_ts,
+                        buy_delta,
+                        self.max_buy_cvd_for_short,
+                    )
+                    continue
+
+            if self.use_sell_cvd_filter:
+                if (not math.isfinite(sell_delta)) or sell_delta <= self.min_sell_cvd_for_short:
+                    logger.debug(
+                        "%s @ %s: sell CVD = %s must be > min_sell_cvd_for_short=%s – skipping",
+                        asset,
+                        current_ts,
+                        sell_delta,
+                        self.min_sell_cvd_for_short,
+                    )
+                    continue
+
+            # asset passed all filters – add to ranking list
             ranked_entries.append((asset, confidence, slope, raw_slope, imbalance_pct))
 
         ranked_entries.sort(key=lambda x: x[1], reverse=True)
@@ -444,6 +564,14 @@ class WeatherMarketImbalanceStrategy(Strategy):
             entry_price = float(prices.iloc[index][asset])
             if np.isnan(entry_price) or entry_price <= 0:
                 continue
+            logger.debug(
+                "opening short %s @ %s price=%.5f buy_cvd=%.2f sell_cvd=%.2f",
+                asset,
+                current_ts,
+                entry_price,
+                buy_delta,
+                sell_delta,
+            )
             self._positions[asset] = {
                 "entry_price": entry_price,
                 "entry_index": int(index),
@@ -453,6 +581,8 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 "vwap_slope": float(slope),
                 "vwap_slope_raw": float(raw_slope),
                 "vwap_volume_imbalance_pct": float(imbalance_pct),
+                "buy_cvd": float(buy_delta),
+                "sell_cvd": float(sell_delta),
             }
 
         # Build short-only weight vector

@@ -154,6 +154,31 @@ def _entry_markers(market_trades: pd.DataFrame, series: pd.Series):
     times = pd.to_datetime(market_trades["entry_time"])
     return times, series.reindex(times).to_numpy(dtype=float)
 
+
+def _overlay_entry_markers(
+    ax,
+    market_trades: pd.DataFrame,
+    series: pd.Series,
+    zorder: int = 7,
+) -> None:
+    """Overlay short-entry markers using the shared _entry_markers helper."""
+    entry_times, entry_vals = _entry_markers(market_trades, series)
+    if entry_times is None or entry_vals is None:
+        return
+    valid = np.isfinite(entry_vals)
+    if not valid.any():
+        return
+    ax.scatter(
+        pd.DatetimeIndex(entry_times)[valid],
+        np.asarray(entry_vals, dtype=float)[valid],
+        marker="v",
+        s=22,
+        color="#FF0000",
+        edgecolors="black",
+        linewidths=0.7,
+        zorder=zorder,
+    )
+
 def _draw_price_panel(
     ax,
     series: pd.Series,
@@ -197,6 +222,7 @@ def _draw_vol_delta_panel(
     ax,
     vol_df: pd.DataFrame | None,
     series: pd.Series,
+    market_trades: pd.DataFrame,
     base_name: str,
     market: str,
     suffix_re,
@@ -219,6 +245,7 @@ def _draw_vol_delta_panel(
     yes_ser = vol_df[yes_col].reindex(series.index).fillna(0.0)
     no_ser = vol_df[no_col].reindex(series.index).fillna(0.0)
     delta = yes_ser - no_ser
+
     colors = ["#00FF00" if v >= 0 else "#FF0000" for v in delta.values]
     ax.bar(delta.index, delta.values, width=bar_width_days, color=colors,
            alpha=0.75, align="center", edgecolor="none")
@@ -233,9 +260,11 @@ def _draw_vol_delta_panel(
             va="top", ha="left", color="#00FF00", alpha=0.85)
     ax.text(0.01, 0.03, style["dn_label"], transform=ax.transAxes, fontsize=7,
             va="bottom", ha="left", color="#FF0000", alpha=0.85)
+
     cum_delta = delta.cumsum()
     if len(cum_delta) > 0:
         cum_delta = cum_delta - cum_delta.iloc[0]
+    
     cum_color = style["cum_color"]
     ax_cum = ax.twinx()
     ax_cum.plot(cum_delta.index, cum_delta.values, color=cum_color,
@@ -243,6 +272,9 @@ def _draw_vol_delta_panel(
     ax_cum.axhline(0.0, color=cum_color, linestyle=":", linewidth=0.7, alpha=0.4, zorder=1)
     ax_cum.tick_params(axis="y", labelsize=7, labelcolor=cum_color)
     ax_cum.set_ylabel("cum Δ", fontsize=7, color=cum_color)
+    ax_cum.set_xlim(xlim)
+
+    _overlay_entry_markers(ax_cum, market_trades, cum_delta, zorder=8)
     return True
 
 
@@ -272,6 +304,7 @@ def _draw_vol_imbalance_row(
     draw_volume_imbalance_panel(ax, ratio_pct, entry_times, entry_vals, 
                                 signal_times=signal_times, signal_values=signal_vals, 
                                 lookback_label=lookback, magnitude_threshold=magnitude_threshold)
+    _overlay_entry_markers(ax, market_trades, ratio_pct, zorder=7)
     ax.set_xlim(xlim)
 
 
@@ -415,11 +448,11 @@ def _plot_market_panels(
 
     xlim = axes6[0].get_xlim()
 
-    if not _draw_vol_delta_panel(axes6[1], buy_volume, series, base_name, str(market),
+    if not _draw_vol_delta_panel(axes6[1], buy_volume, series, market_trades, base_name, str(market),
                                  suffix_re, bar_width_days, xlim, kind="buy"):
         axes6[1].set_visible(False)
 
-    if not _draw_vol_delta_panel(axes6[2], sell_volume, series, base_name, str(market),
+    if not _draw_vol_delta_panel(axes6[2], sell_volume, series, market_trades, base_name, str(market),
                                  suffix_re, bar_width_days, xlim, kind="sell"):
         axes6[2].set_visible(False)
 
