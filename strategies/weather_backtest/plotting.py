@@ -15,6 +15,7 @@ from stratlab.strategy.indicators import (
     analyze_band_position_vs_reference,
     detect_mean_reversion_vs_reference,
     market_regimes,
+    select_yes_no_columns,
 )
 from stratlab.report.plot import (
     draw_price_sd_volume_panel,
@@ -40,40 +41,6 @@ def _compact_event_slug(event_slug: str) -> str:
     short = short.replace("-on-", " | ")
     short = short.replace("-", " ")
     return short
-
-
-def _select_buy_cols(buy_df: pd.DataFrame | None, base: str, market_str: str, suffix_re):
-    """Return (no_col, yes_col) column names from buy_df for the given base market name."""
-    if buy_df is None:
-        return None, None
-    col_list = [str(c) for c in buy_df.columns]
-    cand_no = None
-    cand_yes = None
-    exact_no = f"{base}__no"
-    exact_yes = f"{base}__yes"
-    if exact_no in col_list:
-        cand_no = exact_no
-    if exact_yes in col_list:
-        cand_yes = exact_yes
-    if cand_no is None:
-        for c in col_list:
-            if c.lower().startswith(base.lower()) and c.lower().endswith("__no"):
-                cand_no = c
-                break
-    if cand_yes is None:
-        for c in col_list:
-            if c.lower().startswith(base.lower()) and c.lower().endswith("__yes"):
-                cand_yes = c
-                break
-    if (cand_no is None or cand_yes is None) and base in col_list:
-        m_m = suffix_re.match(market_str)
-        if m_m:
-            suffix = m_m.group(2).lower()
-            if suffix == "no":
-                cand_no = cand_no or base
-            elif suffix == "yes":
-                cand_yes = cand_yes or base
-    return cand_no, cand_yes
 
 
 # ---------------------------------------------------------------------------
@@ -238,7 +205,7 @@ def _draw_vol_delta_panel(
         "buy" or "sell" — controls title text, annotation labels, and cumulative line color.
     """
     style = _VOL_DELTA_STYLES[kind]
-    no_col, yes_col = _select_buy_cols(vol_df, base_name, market, suffix_re)
+    no_col, yes_col = select_yes_no_columns(vol_df, base_name, market, suffix_re)
     if vol_df is None or yes_col is None or no_col is None:
         return False
 
