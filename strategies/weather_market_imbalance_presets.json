@@ -20,6 +20,7 @@
     "max_buy_cvd_for_short": 0.0,
     "use_sell_cvd_filter": true,
     "min_sell_cvd_for_short": 0.0,
+    "use_cvd_sd_gate": true,
     "max_concurrent_positions": null,
     "take_profit": 0.35,
     "stop_loss": 0.12
@@ -42,9 +43,10 @@
     "vwap_slope_lookback": 60,
     "max_vwap_slope": -0.5,
     "use_buy_cvd_filter": true,
-    "max_buy_cvd_for_short": -1000.0,
+    "max_buy_cvd_for_short": -500.0,
     "use_sell_cvd_filter": true,
     "min_sell_cvd_for_short": 0.0,
+    "use_cvd_sd_gate": true,
     "max_concurrent_positions": null,
     "take_profit": 0.5,
     "stop_loss": 0.2
@@ -70,6 +72,7 @@
     "max_buy_cvd_for_short": 0.0,
     "use_sell_cvd_filter": true,
     "min_sell_cvd_for_short": 0.0,
+    "use_cvd_sd_gate": true,
     "max_concurrent_positions": null,
     "take_profit": 0.25,
     "stop_loss": 0.25

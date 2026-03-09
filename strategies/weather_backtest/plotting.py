@@ -234,6 +234,35 @@ def _draw_vol_delta_panel(
     
     cum_color = style["cum_color"]
     ax_cum = ax.twinx()
+
+    # Compute expanding SD bands for cumulative delta and draw them behind the cum line
+    try:
+        cum_delta_bands = sd_bands_rolling(cum_delta)
+        if cum_delta_bands is not None:
+            cum_delta_bands = cum_delta_bands.reindex(cum_delta.index)
+            has_mean = "mean" in cum_delta_bands.columns
+            has_p1 = "+1sd" in cum_delta_bands.columns and "-1sd" in cum_delta_bands.columns
+            has_p2 = "+2sd" in cum_delta_bands.columns and "-2sd" in cum_delta_bands.columns
+            has_p3 = "+3sd" in cum_delta_bands.columns and "-3sd" in cum_delta_bands.columns
+
+            # shaded ±3sd, ±2sd, and ±1sd regions (subtle alpha) and dashed mean line
+            if has_p3:
+                ax_cum.fill_between(cum_delta_bands.index, cum_delta_bands["-3sd"], cum_delta_bands["+3sd"],
+                                    color=cum_color, alpha=0.03, zorder=0)
+            if has_p2:
+                ax_cum.fill_between(cum_delta_bands.index, cum_delta_bands["-2sd"], cum_delta_bands["+2sd"],
+                                    color=cum_color, alpha=0.05, zorder=1)
+            if has_p1:
+                ax_cum.fill_between(cum_delta_bands.index, cum_delta_bands["-1sd"], cum_delta_bands["+1sd"],
+                                    color=cum_color, alpha=0.08, zorder=2)
+            if has_mean:
+                ax_cum.plot(cum_delta_bands.index, cum_delta_bands["mean"], color=cum_color, linestyle="--",
+                            linewidth=0.9, alpha=0.6, zorder=3)
+    except Exception:
+        # non-fatal: if band computation fails, continue plotting cum line only
+        pass
+
+    # plot cumulative delta on top of bands
     ax_cum.plot(cum_delta.index, cum_delta.values, color=cum_color,
                 linewidth=1.4, alpha=0.85, zorder=5)
     ax_cum.axhline(0.0, color=cum_color, linestyle=":", linewidth=0.7, alpha=0.4, zorder=1)

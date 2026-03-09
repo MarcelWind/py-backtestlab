@@ -34,7 +34,7 @@ def _compute_price(
     close: float,
     high: float | None = None,
     low: float | None = None,
-    open_: float | None = None,
+    open_: float | None = None, # open is a reserved keyword, so we use open_ in the signature
     method: str = "typical",
 ) -> float:
     """Compute price based on pricing method.
@@ -1594,3 +1594,188 @@ class CumulativeVolumeDelta(Indicator):
         self._next_bar = index + 1
         result = {a: (self._history[a][-1] if a in self._history and self._history[a] else float("nan")) for a in prices.columns}
         return pd.Series(result, dtype=float)
+    
+    
+
+class CumulativeYesNoDelta(Indicator):
+    """Incremental cumulative yes-minus-no delta indicator.
+
+    Maintains per-asset running cumulative sums of (yes - no) taken from a
+    provided `volume_df` containing paired yes/no columns. The indicator
+    exposes `series(asset)` to retrieve the full pd.Series history for an
+    asset when needed by downstream indicators.
+
+    Parameters
+    ----------
+    volume_df:
+        DataFrame containing yes/no columns (may be None).
+    name:
+        Indicator name key stored in the strategy's `indicators` map.
+    """
+
+    @property
+    def name(self) -> str:
+        return self._indicator_name
+
+    def __init__(self, volume_df: pd.DataFrame | None = None, name: str = "cum_yes_no_delta") -> None:
+        self._volume = volume_df if volume_df is not None else pd.DataFrame()
+        self._indicator_name = name
+        self._history: dict[str, list[float]] = {}
+        self._ts_lists: dict[str, list] = {}
+        self._col_map: dict[str, tuple[str | None, str | None]] = {}
+        # running statistics for incremental threshold computation
+        self._baseline_map: dict[str, float] = {}
+        self._sums: dict[str, float] = {}
+        self._sum_sqs: dict[str, float] = {}
+        self._counts: dict[str, int] = {}
+        self._thr_history: dict[str, list[float]] = {}
+        self._next_bar: int = -1
+
+    def _process_bar(self, prices: pd.DataFrame, i: int) -> None:
+        ts = prices.index[i]
+        for asset in prices.columns:
+            no_col, yes_col = self._col_map.get(asset, (None, None))
+            if no_col is None or yes_col is None:
+                no_col, yes_col = select_yes_no_columns(self._volume, asset, asset)
+                self._col_map[asset] = (no_col, yes_col)
+
+            if yes_col is None or no_col is None or self._volume is None:
+                # treat as missing data: carry forward previous cumulative value
+                prev = self._history.get(asset, [0.0])[-1] if self._history.get(asset) else 0.0
+                cur = prev
+                self._history.setdefault(asset, []).append(cur)
+                self._ts_lists.setdefault(asset, []).append(ts)
+                # ensure baseline exists
+                if asset not in self._baseline_map:
+                    self._baseline_map[asset] = cur
+                # update running stats using baseline-shifted value
+                baseline = self._baseline_map[asset]
+                shifted = cur - baseline
+                self._sums[asset] = self._sums.get(asset, 0.0) + shifted
+                self._sum_sqs[asset] = self._sum_sqs.get(asset, 0.0) + shifted * shifted
+                self._counts[asset] = self._counts.get(asset, 0) + 1
+                n = self._counts[asset]
+                mean = self._sums[asset] / n
+                var = max(self._sum_sqs[asset] / n - mean * mean, 0.0)
+                s = float(np.sqrt(var))
+                thr = mean - 3.0 * s
+                self._thr_history.setdefault(asset, []).append(thr)
+                continue
+
+            try:
+                yes = float(self._volume.iloc[i][yes_col])
+            except Exception:
+                yes = 0.0
+            try:
+                no = float(self._volume.iloc[i][no_col])
+            except Exception:
+                no = 0.0
+            if not np.isfinite(yes):
+                yes = 0.0
+            if not np.isfinite(no):
+                no = 0.0
+            delta = yes - no
+            prev = self._history.get(asset, [0.0])[-1] if self._history.get(asset) else 0.0
+            cur = prev + delta
+            self._history.setdefault(asset, []).append(cur)
+            self._ts_lists.setdefault(asset, []).append(ts)
+            # set baseline on first observed value so first shifted value is zero
+            if asset not in self._baseline_map:
+                self._baseline_map[asset] = cur
+            baseline = self._baseline_map[asset]
+            shifted = cur - baseline
+            # update running sums for incremental mean/std of shifted cumulative
+            self._sums[asset] = self._sums.get(asset, 0.0) + shifted
+            self._sum_sqs[asset] = self._sum_sqs.get(asset, 0.0) + shifted * shifted
+            self._counts[asset] = self._counts.get(asset, 0) + 1
+            n = self._counts[asset]
+            mean = self._sums[asset] / n
+            var = max(self._sum_sqs[asset] / n - mean * mean, 0.0)
+            s = float(np.sqrt(var))
+            thr = mean - 3.0 * s
+            self._thr_history.setdefault(asset, []).append(thr)
+
+    def compute(self, prices: pd.DataFrame, returns: pd.DataFrame, index: int) -> pd.Series:
+        if self._next_bar < 0:
+            self._next_bar = 0
+        for i in range(self._next_bar, index + 1):
+            self._process_bar(prices, i)
+        self._next_bar = index + 1
+        result = {a: (self._history[a][-1] if a in self._history and self._history[a] else float("nan")) for a in prices.columns}
+        return pd.Series(result, dtype=float)
+
+    def series(self, asset: str) -> "pd.Series | None":
+        """Return full cumulative series for *asset* as a pd.Series indexed by timestamps.
+
+        Returns None if no history is available for the asset.
+        """
+        rows = self._history.get(asset)
+        ts = self._ts_lists.get(asset)
+        if not rows or not ts:
+            return None
+        baseline = self._baseline_map.get(asset)
+        arr = pd.Series(rows, index=ts, dtype=float)
+        if baseline is not None:
+            arr = arr - float(baseline)
+        return arr
+
+    def threshold_series(self, asset: str) -> "pd.Series | None":
+        """Return the per-bar -3sd threshold series for *asset* as a pd.Series indexed by timestamps."""
+        rows = self._thr_history.get(asset)
+        ts = self._ts_lists.get(asset)
+        if not rows or not ts:
+            return None
+        return pd.Series(rows, index=ts, dtype=float)
+
+
+class CvdSdThreshold(Indicator):
+    """Compute per-asset -3sd threshold from a precomputed cumulative delta indicator.
+
+    This refactored implementation expects a reference to a
+    `CumulativeYesNoDelta` indicator instance. It does not re-resolve
+    yes/no columns or recompute cumulative sums itself — instead it reads the
+    cumulative series produced by the referenced indicator and applies
+    `sd_bands_rolling()` to that series to extract the -3sd threshold.
+
+    Parameters
+    ----------
+    cum_delta_indicator:
+        Instance of `CumulativeYesNoDelta` that provides per-asset cumulative
+        yes/no delta series via its `series(asset)` method.
+    name:
+        Optional indicator name.
+    """
+
+    @property
+    def name(self) -> str:
+        return self._indicator_name
+
+    def __init__(self, cum_delta_indicator: "CumulativeYesNoDelta | None" = None, name: str = "cvd_sd_threshold") -> None:
+        self._cum_indicator = cum_delta_indicator
+        self._indicator_name = name
+
+    def compute(self, prices: pd.DataFrame, returns: pd.DataFrame, index: int) -> pd.Series:
+        assets = prices.columns.tolist()
+        out: dict[str, float] = {}
+
+        if self._cum_indicator is None:
+            for a in assets:
+                out[a] = float("nan")
+            return pd.Series(out)
+
+        for asset in assets:
+            try:
+                thr_ser = self._cum_indicator.threshold_series(asset)
+                if thr_ser is None or len(thr_ser) == 0 or index >= len(thr_ser):
+                    out[asset] = float("nan")
+                    continue
+                try:
+                    out[asset] = float(thr_ser.iloc[index])
+                except Exception:
+                    out[asset] = float("nan")
+            except Exception:
+                out[asset] = float("nan")
+
+        return pd.Series(out)
+
+
