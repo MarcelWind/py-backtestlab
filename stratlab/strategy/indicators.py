@@ -844,15 +844,16 @@ class MeanReversion(Indicator):
 # Cumulative Band Analysis (Market Regime Analysis)
 # ---------------------------------------------------------------------------
 
-def sd_bands_rolling(
+def sd_bands_expanding(
     prices_series: np.ndarray | pd.Series,
     timestamps: np.ndarray | pd.Index | None = None,
 ) -> pd.DataFrame:
     """
-    Compute cumulative rolling standard deviation bands for a single price series.
+    Compute cumulative expanding standard deviation bands for a single price series.
 
-    For each bar, computes mean and std of all historical prices up to that bar.
-    Returns a DataFrame with columns: mean, +1sd, -1sd, +2sd, -2sd, +3sd, -3sd.
+    For each bar, computes mean and std of all historical prices up to that bar
+    (expanding / full-history). Returns a DataFrame with columns: mean,
+    +1sd, -1sd, +2sd, -2sd, +3sd, -3sd.
 
     Parameters
     ----------
@@ -892,7 +893,7 @@ class SdBands(Indicator):
     """Expanding mean/std band indicator, computed incrementally per bar.
 
     Maintains running sum/sum_sq/count per asset for O(1) per-bar updates
-    (vs. O(n) per bar in the standalone ``sd_bands_rolling`` function).
+    (vs. O(n) per bar in the standalone ``sd_bands_expanding`` function).
     Accumulates the full band history accessible via ``band_series``.
     
     Parameters
@@ -1454,8 +1455,8 @@ class RegimeClassification(Indicator):
         scores = {}
 
         for asset in assets:
-            # Compute bands for this asset
-            bands = sd_bands_rolling(prices[asset])
+            # Compute bands for this asset (expanding / full-history bands)
+            bands = sd_bands_expanding(prices[asset])
 
             # Compute band position stats
             band_stats = self._compute_band_position(
@@ -1735,7 +1736,7 @@ class CvdSdThreshold(Indicator):
     `CumulativeYesNoDelta` indicator instance. It does not re-resolve
     yes/no columns or recompute cumulative sums itself — instead it reads the
     cumulative series produced by the referenced indicator and applies
-    `sd_bands_rolling()` to that series to extract the -3sd threshold.
+    `sd_bands_expanding()` to that series to extract the -3sd threshold.
 
     Parameters
     ----------
@@ -1777,5 +1778,183 @@ class CvdSdThreshold(Indicator):
                 out[asset] = float("nan")
 
         return pd.Series(out)
+
+
+# ---------------------------------------------------------------------------
+# Stop-loss and Take-profit helpers
+# ---------------------------------------------------------------------------
+
+
+class StopLossIndicator(Indicator):
+    """Compute candidate stop prices based on SD bands or VWAP.
+
+    This helper indicator stores references to a pre-existing `SdBands`
+    or `Vwap` indicator instance and can compute an entry-time stop price
+    given an entry timestamp and price. The indicator's `compute` method
+    returns a per-asset NaN series by default so it integrates cleanly with
+    the declarative indicator system; callers should use
+    `stop_price_for_entry(...)` to obtain the stop price at a specific
+    entry bar.
+    """
+
+    def __init__(
+        self,
+        sd_bands: SdBands | None = None,
+        vwap_indicator: Vwap | None = None,
+        mode: str = "band",
+        band_offset: int = 1,
+        vwap_offset_pct: float = 0.0,
+        name: str = "stop_loss",
+    ) -> None:
+        self._sd_bands = sd_bands
+        self._vwap_indicator = vwap_indicator
+        self.mode = str(mode)
+        self.band_offset = int(band_offset)
+        self._indicator_name = name
+
+    @property
+    def name(self) -> str:
+        return self._indicator_name
+
+    def compute(self, prices: pd.DataFrame, returns: pd.DataFrame, index: int) -> pd.Series:
+        # Default behaviour: indicator system expects a pd.Series. We don't
+        # supply a per-bar stop price by default here — callers should use
+        # `stop_price_for_entry` at the exact entry bar. Return NaNs so the
+        # indicator map contains the key.
+        return pd.Series({a: float("nan") for a in prices.columns}, dtype=float)
+
+    def _nearest_band_index(self, band_row: pd.Series, price: float) -> int | None:
+        # Map band labels to integer indexes: mean=0, +1sd=1, -1sd=-1, etc.
+        mapping = {
+            "mean": 0,
+            "+1sd": 1,
+            "+2sd": 2,
+            "+3sd": 3,
+            "-1sd": -1,
+            "-2sd": -2,
+            "-3sd": -3,
+        }
+        best = None
+        best_idx = None
+        for k, idx in mapping.items():
+            if k not in band_row.index:
+                continue
+            try:
+                v = float(band_row[k])
+            except Exception:
+                continue
+            d = abs(price - v)
+            if best is None or d < best:
+                best = d
+                best_idx = idx
+        return best_idx
+
+    def stop_price_for_entry(
+        self,
+        prices: pd.DataFrame,
+        entry_index: int,
+        asset: str,
+        entry_price: float,
+    ) -> float:
+        """Compute an absolute stop price for *asset* at the given entry bar.
+
+        Returns a float stop price or NaN if computation isn't possible.
+        """
+        # Band-based stop
+        if self.mode == "band" and self._sd_bands is not None:
+            try:
+                ts = prices.index[entry_index]
+                bands = self._sd_bands.band_slice(asset, ts, ts)
+                if bands is None or bands.empty:
+                    return float("nan")
+                row = bands.iloc[-1]
+                entry_band = self._nearest_band_index(row, float(entry_price))
+                if entry_band is None:
+                    return float("nan")
+                # Move the target band toward the mean relative to the entry band.
+                # If the entry is above the mean (positive index), subtract the
+                # offset so the stop lies closer to mean/VWAP. If entry is below
+                # the mean (negative index), add the offset. If exactly at the
+                # mean, default to moving outward by adding the offset.
+                if entry_band > 0:
+                    target = entry_band - int(self.band_offset)
+                elif entry_band < 0:
+                    target = entry_band + int(self.band_offset)
+                else:
+                    target = entry_band + int(self.band_offset)
+                # clamp target to [-3,3]
+                target = max(-3, min(3, target))
+                # map back to label
+                label = None
+                if target == 0:
+                    label = "mean"
+                elif target > 0:
+                    label = f"+{target}sd"
+                else:
+                    label = f"{target}sd"
+                if label not in row.index:
+                    return float("nan")
+                stop_val = float(row[label])
+                # Ensure stop is not on the wrong side of the entry price.
+                # For short positions a stop below the entry would immediately
+                # be true on the next tick; avoid that by enforcing a tiny
+                # buffer above the entry when the computed stop is <= entry.
+                try:
+                    ep = float(entry_price)
+                except Exception:
+                    ep = None
+                if ep is not None and np.isfinite(ep) and stop_val <= ep:
+                    # use multiplicative buffer so this also works for tiny prices
+                    stop_val = ep * 1.000001
+                return float(stop_val)
+            except Exception:
+                return float("nan")
+
+        # VWAP-based stop: stop = VWAP
+        if self.mode == "vwap" and self._vwap_indicator is not None:
+            try:
+                ts = prices.index[entry_index]
+                ser = self._vwap_indicator.vwap_slice(asset, ts, ts)
+                if ser is None or ser.empty:
+                    return float("nan")
+                v = float(ser.iloc[-1])
+                stop_val = float(v)
+                try:
+                    ep = float(entry_price)
+                except Exception:
+                    ep = None
+                if ep is not None and np.isfinite(ep) and stop_val <= ep:
+                    stop_val = ep * 1.000001
+                return float(stop_val)
+            except Exception:
+                return float("nan")
+
+        return float("nan")
+
+
+class TakeProfitIndicator(Indicator):
+    """Simple take-profit threshold indicator.
+
+    For the current task the TP is a small absolute price threshold near
+    zero. The indicator stores a `price_threshold` value and exposes it via
+    `threshold_for_entry` so strategies can record the TP price at entry.
+    """
+
+    def __init__(self, price_threshold: float = 0.01, name: str = "take_profit") -> None:
+        self.price_threshold = float(price_threshold)
+        self._indicator_name = name
+
+    @property
+    def name(self) -> str:
+        return self._indicator_name
+
+    def compute(self, prices: pd.DataFrame, returns: pd.DataFrame, index: int) -> pd.Series:
+        # Return the threshold value per asset for integration; strategies
+        # will typically read the threshold at entry and store it.
+        return pd.Series({a: float(self.price_threshold) for a in prices.columns}, dtype=float)
+
+    def threshold_for_entry(self, prices: pd.DataFrame, entry_index: int, asset: str, entry_price: float) -> float:
+        return float(self.price_threshold)
+
 
 

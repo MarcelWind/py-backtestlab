@@ -11,7 +11,7 @@ from stratlab.strategy.indicators import (
     VwapSlope,
     VwapVolumeImbalance,
     MeanReversion,
-    sd_bands_rolling,
+    sd_bands_expanding,
     analyze_band_position_vs_reference,
     detect_mean_reversion_vs_reference,
     market_regimes,
@@ -94,7 +94,7 @@ def _prepare_market_data(
             bands_df = bands_df[~bands_df.index.duplicated(keep='first')]
         bands_full = bands_df.reindex(pd.to_datetime(series.index)).copy()
     else:
-        bands_full = sd_bands_rolling(price_arr, timestamps).copy()
+        bands_full = sd_bands_expanding(price_arr, timestamps).copy()
     bands_full["price"] = price_arr
     bands_full["timestamp"] = timestamps
     band_cols = ["timestamp", "price", "mean", "-3sd", "-2sd", "-1sd", "+1sd", "+2sd", "+3sd"]
@@ -158,14 +158,53 @@ def _draw_price_panel(
     timestamps: np.ndarray,
     market_trades: pd.DataFrame,
     display_market: str,
+    highs: pd.Series | None = None,
+    lows: pd.Series | None = None,
+    opens: pd.Series | None = None,
 ) -> None:
     """Draw panel 0: price + SD bands + VWAP + volume + regime overlays + trade markers + title."""
-    draw_price_sd_volume_panel(ax, series, bands_full, vwap_s=vwap_s, vol_s=vol_s,
-                               bar_width_days=bar_width_days)
+    # If intrabar highs/lows are provided, render candlesticks. Prefer an
+    # explicit `opens` series if supplied; otherwise fall back to prior-close.
+    if highs is not None and lows is not None:
+        if opens is not None:
+            try:
+                o_s = opens.reindex(series.index)
+                if hasattr(o_s, "columns"):
+                    o_s = o_s.iloc[:, 0]
+            except Exception:
+                o_s = None
+        else:
+            o_s = None
+
+        # fallback to prior close when explicit opens missing
+        if o_s is None:
+            try:
+                o_s = series.shift(1).reindex(series.index)
+                o_s.iloc[0] = series.iloc[0]
+            except Exception:
+                o_s = series.copy()
+
+        draw_price_sd_volume_panel(
+            ax,
+            series,
+            bands_full,
+            vwap_s=vwap_s,
+            vol_s=vol_s,
+            bar_width_days=bar_width_days,
+            use_candles=True,
+            opens=o_s,
+            highs=highs,
+            lows=lows,
+            candle_kwargs={"up_color": "#2ca02c", "down_color": "#d62728"},
+        )
+    else:
+        draw_price_sd_volume_panel(ax, series, bands_full, vwap_s=vwap_s, vol_s=vol_s,
+                                   bar_width_days=bar_width_days)
 
     window_hours_dict = {wh: f"T-{wh}h" for wh in WINDOW_HOURS}
     windows_str = draw_regime_overlays(ax, mdf, bands_full, window_hours_dict, WINDOW_COLORS)
-    trade_info = draw_trade_markers(ax, market_trades)
+    # draw trade markers, prefer intrabar highs/lows when available
+    trade_info = draw_trade_markers(ax, market_trades, highs=highs, lows=lows)
 
     pos = analyze_band_position_vs_reference(price_arr, bands_full, timestamps)
     mean_rev_full = detect_mean_reversion_vs_reference(price_arr, bands_full, timestamps, 5)
@@ -237,7 +276,7 @@ def _draw_vol_delta_panel(
 
     # Compute expanding SD bands for cumulative delta and draw them behind the cum line
     try:
-        cum_delta_bands = sd_bands_rolling(cum_delta)
+        cum_delta_bands = sd_bands_expanding(cum_delta)
         if cum_delta_bands is not None:
             cum_delta_bands = cum_delta_bands.reindex(cum_delta.index)
             has_mean = "mean" in cum_delta_bands.columns
@@ -417,6 +456,9 @@ def _plot_market_panels(
     ind_map: dict,
     suffix_re,
     sdbands: dict[str, pd.DataFrame] | None = None,
+    high: pd.DataFrame | None = None,
+    low: pd.DataFrame | None = None,
+    opens: pd.DataFrame | None = None,
     max_vwap_slope: float | None = None,
     mean_reversion_threshold: float | None = 0.5,
     vwap_slope_mode: str = "raw",
@@ -434,12 +476,17 @@ def _plot_market_panels(
         return
 
     series, mdf, bar_width_days, bands_full, vwap_s, vol_s, display_market, price_arr, timestamps = result
+    # prepare intrabar high/low series aligned to this market's index if provided
+    high_s = high[market].reindex(series.index) if high is not None and market in high.columns else None
+    low_s = low[market].reindex(series.index) if low is not None and market in low.columns else None
+    opens_s = opens[market].reindex(series.index) if opens is not None and market in opens.columns else None
     market_trades = trades[trades["asset"] == market] if not trades.empty else pd.DataFrame()
     m_match = suffix_re.match(str(market))
     base_name = m_match.group(1) if m_match else str(market)
 
     _draw_price_panel(axes6[0], series, mdf, bands_full, vwap_s, vol_s, bar_width_days,
-                      price_arr, timestamps, market_trades, display_market)
+                      price_arr, timestamps, market_trades, display_market,
+                      highs=high_s, lows=low_s, opens=opens_s)
     draw_volume_profile_inset(axes6[0], series, vol_s)
 
     xlim = axes6[0].get_xlim()
@@ -476,6 +523,9 @@ def plot_entries_exits(
     volume: pd.DataFrame | None = None,
     buy_volume: pd.DataFrame | None = None,
     sell_volume: pd.DataFrame | None = None,
+    high: pd.DataFrame | None = None,
+    low: pd.DataFrame | None = None,
+    opens: pd.DataFrame | None = None,
     indicator_series: dict[str, pd.DataFrame] | None = None,
     indicator_defs: list | None = None,
     # Legacy fallback params — used only when indicator_defs is None:
@@ -649,6 +699,7 @@ def plot_entries_exits(
             signal_magnitude_threshold_imbalance=signal_magnitude_threshold_imbalance,
             signal_magnitude_threshold_slope=signal_magnitude_threshold_slope,
             signal_magnitude_threshold_meanrev=signal_magnitude_threshold_meanrev,
+            high=high, low=low, opens=opens,
         )
 
     # Hide spacer rows between market groups

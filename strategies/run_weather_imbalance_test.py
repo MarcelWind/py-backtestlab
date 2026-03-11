@@ -163,6 +163,9 @@ def replot_backtest(
         out_path=plot_path,
         vwap=vwap,
         volume=volume,
+        high=high,
+        low=low,
+        opens=open_,
         buy_volume=buy_volume_full,
         sell_volume=sell_volume_full,
         indicator_series=indicator_signals,
@@ -329,29 +332,45 @@ def main() -> None:
     with open(indicator_signals_path, "wb") as f:
         pickle.dump(indicator_signals, f)
 
-    if trades_df.empty:
-        pd.DataFrame(
-            columns=[
-                "asset",
-                "entry_index",
-                "entry_time",
-                "entry_price",
-                "exit_index",
-                "exit_time",
-                "exit_price",
-                "exit_reason",
-                "pnl",
-                "regime",
-                "confidence",
-                "vwap_slope",
-                "vwap_slope_raw",
-                "vwap_volume_imbalance_pct",
-                "buy_cvd",
-                "sell_cvd",
-            ]
-        ).to_csv(trades_path, index=False)
-    else:
-        trades_df.to_csv(trades_path, index=False)
+    # If intrabar high/low series are available, prefer those as the recorded
+    # exit fill price for stop/take exits so recorded `exit_price` matches
+    # the plotted intrabar marker.
+    def _apply_intrabar_fills(df, high_df, low_df):
+        if df is None or df.empty:
+            return df
+        if high_df is None and low_df is None:
+            return df
+        for idx, row in df.iterrows():
+            exit_time_raw = row.get("exit_time", None)
+            if pd.isna(exit_time_raw) or exit_time_raw is None:
+                continue
+            try:
+                et = pd.to_datetime(exit_time_raw)
+            except Exception:
+                continue
+            asset = row.get("asset")
+            reason = str(row.get("exit_reason", ""))
+            chosen = None
+            if reason == "stop_loss" and high_df is not None and asset in high_df.columns:
+                try:
+                    val = high_df[asset].reindex([et]).iloc[0]
+                    if pd.notna(val):
+                        chosen = float(val)
+                except Exception:
+                    pass
+            if reason == "take_profit" and low_df is not None and asset in low_df.columns:
+                try:
+                    val = low_df[asset].reindex([et]).iloc[0]
+                    if pd.notna(val):
+                        chosen = float(val)
+                except Exception:
+                    pass
+            if chosen is not None:
+                df.at[idx, "exit_price"] = chosen
+        return df
+
+    trades_df = _apply_intrabar_fills(trades_df, high, low)
+    trades_df.to_csv(trades_path, index=False)
 
     plot_entries_exits(
         prices=prices,
@@ -361,6 +380,8 @@ def main() -> None:
         out_path=plot_path,
         vwap=vwap,
         volume=volume,
+        high=high,
+        low=low,
         # prefer passing the unfiltered buy/sell matrices so both
         # `__yes` and `__no` outcome columns (if present) can be plotted
         # regardless of the strategy's `prefer_outcome` used for backtesting.

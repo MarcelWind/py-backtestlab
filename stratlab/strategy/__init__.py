@@ -11,7 +11,7 @@ from .indicators import (
     VwapSlope,
     VwapVolumeImbalance,
     RegimeClassification,
-    sd_bands_rolling,
+    sd_bands_expanding,
     market_regimes,
     analyze_band_position_vs_reference,
     detect_mean_reversion_vs_reference,

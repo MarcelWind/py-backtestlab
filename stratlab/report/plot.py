@@ -8,6 +8,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
+from matplotlib.lines import Line2D
 
 from stratlab.strategy.indicators import (
     analyze_band_position_vs_reference,
@@ -123,6 +125,90 @@ def plot_backtest(
 
     plt.tight_layout()
     return fig
+
+
+def plot_candles(
+    ax,
+    opens: pd.Series,
+    highs: pd.Series,
+    lows: pd.Series,
+    closes: pd.Series,
+    width: float | None = None,
+    up_color: str = "tab:blue",
+    down_color: str = "tab:black",
+    linewidth: float = 0.6,
+    alpha: float = 0.9,
+):
+    """Draw simple OHLC candlesticks onto an Axes.
+
+    Parameters
+    - ax: Matplotlib Axes
+    - opens/highs/lows/closes: pandas Series indexed by datetimes
+    - width: width in days for each candle (matplotlib date units). If None,
+      the median timedelta between samples * 0.8 is used.
+    - up_color/down_color: colors for bullish/bearish candles
+    """
+    # Align indices
+    closes = closes.reindex(opens.index)
+    highs = highs.reindex(opens.index)
+    lows = lows.reindex(opens.index)
+
+    # compute width in matplotlib date units (days)
+    if width is None:
+        try:
+            diffs = pd.DatetimeIndex(opens.index).to_series().diff().dropna()
+            width = float(diffs.median().total_seconds() / 86400) * 0.8
+        except Exception:
+            width = 0.8
+
+    dates = mdates.date2num(pd.to_datetime(opens.index))
+
+    for dt_num, o, h, l, c in zip(dates, opens.values, highs.values, lows.values, closes.values):
+        # wick
+        line = Line2D([dt_num, dt_num], [l, h], color="black", linewidth=linewidth, zorder=1)
+        ax.add_line(line)
+
+        # body
+        bottom = min(o, c)
+        height = abs(c - o)
+        color = up_color if c >= o else down_color
+
+        # If height is zero, draw a thin line instead of rectangle to remain visible
+        if height <= 0:
+            ax.add_line(Line2D([dt_num - width / 2, dt_num + width / 2], [c, c], color=color, linewidth=linewidth, zorder=2))
+        else:
+            rect = Rectangle(
+                (dt_num - width / 2, bottom),
+                width,
+                height,
+                facecolor=color,
+                edgecolor="black",
+                linewidth=linewidth,
+                alpha=alpha,
+                zorder=2,
+            )
+            ax.add_patch(rect)
+
+    # Ensure x-axis uses dates formatting
+    ax.xaxis_date()
+
+    # Set axis limits to encompass candles (patches don't always affect autoscale)
+    try:
+        valid_mask = (~np.isnan(dates)) & (~np.isnan(highs.values)) & (~np.isnan(lows.values))
+        if np.any(valid_mask):
+            dmin = float(np.min(dates[valid_mask]))
+            dmax = float(np.max(dates[valid_mask]))
+            ax.set_xlim(dmin - float(width), dmax + float(width))
+
+            ymin = float(np.nanmin(lows.values[valid_mask]))
+            ymax = float(np.nanmax(highs.values[valid_mask]))
+            yrange = ymax - ymin if ymax > ymin else max(1.0, abs(ymax))
+            pad = max(yrange * 0.02, 1e-6)
+            ax.set_ylim(ymin - pad, ymax + pad)
+    except Exception:
+        pass
+
+    return ax
 
 
 def plot_comparison(
@@ -788,7 +874,7 @@ def compute_window_regime_summary(
     price_series:
         Prices for the market (pd.Series with datetime index or numpy array).
     full_bands:
-        Full-history band statistics DataFrame from sd_bands_rolling().
+        Full-history band statistics DataFrame from sd_bands_expanding().
         Index should be timestamps.
     window_hours:
         Dict mapping hours to labels, e.g. {48: "2d", 24: "1d", 6: "6h"}.
@@ -967,6 +1053,11 @@ def draw_price_sd_volume_panel(
     vwap_s: pd.Series | None = None,
     vol_s: pd.Series | None = None,
     bar_width_days: float = 15.0 / 1440.0,
+    use_candles: bool = False,
+    opens: pd.Series | pd.DataFrame | None = None,
+    highs: pd.Series | pd.DataFrame | None = None,
+    lows: pd.Series | pd.DataFrame | None = None,
+    candle_kwargs: dict | None = None,
 ) -> None:
     """Draw SD bands, mean line, price line, optional VWAP and volume twin-axis.
 
@@ -977,7 +1068,7 @@ def draw_price_sd_volume_panel(
     series:
         Price series with datetime index.
     bands:
-        DataFrame from sd_bands_rolling() augmented with "timestamp" and "price" columns.
+        DataFrame from sd_bands_expanding() augmented with "timestamp" and "price" columns.
     vwap_s:
         Optional VWAP series aligned to series.index.
     vol_s:
@@ -990,7 +1081,26 @@ def draw_price_sd_volume_panel(
     ax.fill_between(t_full, bands["-2sd"], bands["+2sd"], alpha=0.08, color="#BABABA")
     ax.fill_between(t_full, bands["-1sd"], bands["+1sd"], alpha=0.12, color="#909090")
     ax.plot(t_full, bands["mean"], color="black", linestyle="--", linewidth=1.0, alpha=0.45)
-    ax.plot(bands["timestamp"], bands["price"], color="#A9C4FF", linewidth=1.2, alpha=0.95, zorder=3)
+    # Price rendering: either simple line or candlesticks when OHLC provided
+    if use_candles and opens is not None and highs is not None and lows is not None:
+        try:
+            o = opens.reindex(series.index)
+            h = highs.reindex(series.index)
+            l = lows.reindex(series.index)
+            # If DataFrame provided, pick first column
+            if hasattr(o, "columns"):
+                o = o.iloc[:, 0]
+            if hasattr(h, "columns"):
+                h = h.iloc[:, 0]
+            if hasattr(l, "columns"):
+                l = l.iloc[:, 0]
+            ck = candle_kwargs or {}
+            ck.setdefault("width", bar_width_days)
+            plot_candles(ax, o, h, l, series, **ck)
+        except Exception:
+            ax.plot(bands["timestamp"], bands["price"], color="#A9C4FF", linewidth=1.2, alpha=0.95, zorder=3)
+    else:
+        ax.plot(bands["timestamp"], bands["price"], color="#A9C4FF", linewidth=1.2, alpha=0.95, zorder=3)
 
     if vwap_s is not None and len(vwap_s.dropna()) > 0:
         vwap_clean = vwap_s.reindex(series.index)
@@ -1049,7 +1159,7 @@ def draw_regime_overlays(
     mdf:
         DataFrame with "timestamp" and "price" columns.
     bands:
-        Full-history bands DataFrame (from sd_bands_rolling).
+        Full-history bands DataFrame (from sd_bands_expanding).
     window_hours:
         Dict mapping hours (int) to label strings, e.g. {24: "T-24h", 6: "T-6h"}.
     window_colors:
@@ -1131,7 +1241,7 @@ def draw_volume_profile_inset(
     ax_profile.spines["right"].set_alpha(0.25)
 
 
-def draw_trade_markers(ax, market_trades: pd.DataFrame) -> str:
+def draw_trade_markers(ax, market_trades: pd.DataFrame, highs: pd.Series | None = None, lows: pd.Series | None = None) -> str:
     """Draw entry/exit scatter markers and connector lines on an axes.
 
     Parameters
@@ -1149,20 +1259,47 @@ def draw_trade_markers(ax, market_trades: pd.DataFrame) -> str:
     """
     if market_trades.empty:
         return "trades=0"
+    # Entry markers (vectorized)
     ax.scatter(
         pd.to_datetime(market_trades["entry_time"]), market_trades["entry_price"],
         marker="v", s=36, color="#FF0000", edgecolors="black", linewidths=0.8, zorder=8,
     )
-    ax.scatter(
-        pd.to_datetime(market_trades["exit_time"]), market_trades["exit_price"],
-        marker="x", s=40, color="#111111", linewidths=0.8, zorder=9,
-    )
+
+    # Exit markers and connecting lines: draw per-trade so we can override
+    # plotted exit price when an intrabar high/low should be used (e.g., stop hit).
     for _, tr in market_trades.iterrows():
-        ax.plot(
-            [pd.to_datetime(tr["entry_time"]), pd.to_datetime(tr["exit_time"])],
-            [tr["entry_price"], tr["exit_price"]],
-            color="#6B6B6B", linewidth=0.8, alpha=0.7, zorder=7,
-        )
+        exit_time = pd.to_datetime(tr["exit_time"]) if pd.notna(tr.get("exit_time", None)) else None
+        plotted_exit_price = tr.get("exit_price", None)
+
+        # Prefer intrabar high for stop_loss exits when available
+        if exit_time is not None and tr.get("exit_reason", "") == "stop_loss" and highs is not None:
+            try:
+                hi = highs.reindex([exit_time]).iloc[0]
+                if pd.notna(hi):
+                    plotted_exit_price = float(hi)
+            except Exception:
+                pass
+
+        # Prefer intrabar low for take_profit exits when available
+        if exit_time is not None and tr.get("exit_reason", "") == "take_profit" and lows is not None:
+            try:
+                lo = lows.reindex([exit_time]).iloc[0]
+                if pd.notna(lo):
+                    plotted_exit_price = float(lo)
+            except Exception:
+                pass
+
+        # draw exit marker and connecting line
+        if exit_time is not None and plotted_exit_price is not None and pd.notna(plotted_exit_price):
+            ax.scatter(
+                [exit_time], [plotted_exit_price], marker="x", s=40, color="#111111",
+                linewidths=0.8, zorder=9,
+            )
+            ax.plot(
+                [pd.to_datetime(tr["entry_time"]), exit_time],
+                [tr["entry_price"], plotted_exit_price],
+                color="#6B6B6B", linewidth=0.8, alpha=0.7, zorder=7,
+            )
     trade_count = len(market_trades)
     mean_pnl = float(market_trades["pnl"].mean())
     return f"trades={trade_count}, avgPnL={mean_pnl:+.3f}"
