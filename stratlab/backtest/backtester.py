@@ -29,7 +29,14 @@ class Backtester:
         self.strategy = strategy
         self.rebalance_freq = rebalance_freq
 
-    def run(self, prices: pd.DataFrame) -> dict:
+    def run(
+        self,
+        prices: pd.DataFrame,
+        *,
+        include_returns: bool = True,
+        include_weights: bool = True,
+        include_indicator_signals: bool = True,
+    ) -> dict:
         """
         Run backtest with the configured strategy.
 
@@ -41,8 +48,11 @@ class Backtester:
             - 'returns': Portfolio returns series aligned to rebalance dates
             - 'weights': Weights history as DataFrame (n_rebalances, n_assets)
             - 'metrics': Performance metrics dict (sharpe, total_return, etc)
-            - 'indicator_signals': Dict mapping indicator name to DataFrame of 
+            - 'indicator_signals': Dict mapping indicator name to DataFrame of
               per-rebalance, per-asset signals (n_rebalances, n_assets)
+
+            The `include_*` flags can be set to False to avoid materializing
+            heavy outputs when only metrics are needed.
         """
         returns = compute_returns(prices)
         n_days = len(returns)
@@ -50,7 +60,7 @@ class Backtester:
         lookback = self.strategy.lookback
 
         portfolio_returns = []
-        weights_history = []
+        weights_history = [] if include_weights else None
         dates = []
 
         current_weights = np.zeros(len(assets))
@@ -67,18 +77,25 @@ class Backtester:
             port_return = float(np.dot(current_weights, day_returns))
 
             portfolio_returns.append(port_return)
-            weights_history.append(current_weights.copy())
+            if include_weights and weights_history is not None:
+                weights_history.append(current_weights.copy())
             dates.append(returns.index[i])
 
         portfolio_returns = pd.Series(portfolio_returns, index=dates, name="portfolio")
-        weights_df = pd.DataFrame(weights_history, index=dates, columns=assets)
-
-        return {
-            "returns": portfolio_returns,
-            "weights": weights_df,
+        result: dict[str, object] = {
             "metrics": compute_metrics(portfolio_returns),
-            "indicator_signals": self.strategy.indicator_series,
         }
+
+        if include_returns:
+            result["returns"] = portfolio_returns
+
+        if include_weights and weights_history is not None:
+            result["weights"] = pd.DataFrame(weights_history, index=dates, columns=assets)
+
+        if include_indicator_signals:
+            result["indicator_signals"] = self.strategy.indicator_series
+
+        return result
 
 
 # Backward compatibility alias

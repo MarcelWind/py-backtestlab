@@ -18,6 +18,7 @@ import argparse
 import json
 import itertools
 import math
+import csv
 import sys
 from pathlib import Path
 from typing import Any, TypedDict
@@ -193,13 +194,16 @@ def _run_trials_with_interrupt_handling(
     objective: str,
     rebalance_freq: int,
     verbose: bool,
-) -> tuple[list[dict[str, Any]], float, dict[str, Any] | None, bool]:
+    trial_writer: "_TrialCsvWriter",
+    top_n: int,
+) -> tuple[int, float, dict[str, Any] | None, bool, list[dict[str, Any]]]:
     """Run Monte Carlo trials and return partial results if interrupted."""
     seen: set[tuple[tuple[str, Any], ...]] = set()
-    trial_rows: list[dict[str, Any]] = []
+    rows_written = 0
     best_score = float("-inf")
     best_params: dict[str, Any] | None = None
     interrupted = False
+    top_rows: list[dict[str, Any]] = []
 
     max_retries_per_trial = 30
     objective_sign = _metric_direction(objective)
@@ -266,6 +270,7 @@ def _run_trials_with_interrupt_handling(
                     prices=bundle["prices"],
                     strategy_kwargs=strategy_kwargs,
                     rebalance_freq=rebalance_freq,
+                    collect_trades=False,
                 )
                 raw_obj = float(metrics.get(objective, 0.0))
                 signed_obj = objective_sign * raw_obj
@@ -279,7 +284,15 @@ def _run_trials_with_interrupt_handling(
             agg_score = float(np.mean(list(per_event_scores.values()))) if per_event_scores else float("-inf")
             row["_objective"] = agg_score
             row["_event_count"] = len(per_event_scores)
-            trial_rows.append(row)
+
+            # Stream each trial row to disk immediately to avoid holding the full
+            # trial history in memory for large runs.
+            trial_writer.write_row(row)
+            rows_written += 1
+
+            top_rows.append(row)
+            if len(top_rows) > top_n:
+                top_rows = sorted(top_rows, key=lambda r: float(r.get("_objective", float("-inf"))), reverse=True)[:top_n]
 
             if agg_score > best_score:
                 best_score = agg_score
@@ -294,21 +307,56 @@ def _run_trials_with_interrupt_handling(
     except KeyboardInterrupt:
         interrupted = True
         print("KeyboardInterrupt received. Saving partial Monte Carlo results...")
+    finally:
+        trial_writer.flush()
 
-    return trial_rows, best_score, best_params, interrupted
+    return rows_written, best_score, best_params, interrupted, top_rows
 
 
 def _run_single_backtest(
     prices: pd.DataFrame,
     strategy_kwargs: dict[str, Any],
     rebalance_freq: int,
+    collect_trades: bool = True,
 ) -> tuple[dict[str, float], pd.DataFrame]:
     strategy = WeatherMarketImbalanceStrategy(**strategy_kwargs)
-    result = Backtester(strategy=strategy, rebalance_freq=rebalance_freq).run(prices)
+    result = Backtester(strategy=strategy, rebalance_freq=rebalance_freq).run(
+        prices,
+        include_returns=False,
+        include_weights=False,
+        include_indicator_signals=False,
+    )
     strategy.finalize(prices)
     metrics = {k: float(v) for k, v in result["metrics"].items()}
-    trades_df = pd.DataFrame(strategy.trade_log)
+    trades_df = pd.DataFrame(strategy.trade_log) if collect_trades else pd.DataFrame()
+    strategy.trade_log.clear()
     return metrics, trades_df
+
+
+class _TrialCsvWriter:
+    """CSV writer that discovers headers from the first row and streams append writes."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._f = path.open("w", newline="")
+        self._writer: csv.DictWriter[str] | None = None
+        self._header: list[str] = []
+
+    def write_row(self, row: dict[str, Any]) -> None:
+        if self._writer is None:
+            self._header = list(row.keys())
+            self._writer = csv.DictWriter(self._f, fieldnames=self._header, extrasaction="ignore")
+            self._writer.writeheader()
+        self._writer.writerow({k: row.get(k) for k in self._header})
+        if self._f.tell() % (1024 * 128) < 1024:
+            self._f.flush()
+
+    def close(self) -> None:
+        self._f.flush()
+        self._f.close()
+
+    def flush(self) -> None:
+        self._f.flush()
 
 
 def _load_event_bundle(
@@ -316,29 +364,11 @@ def _load_event_bundle(
     resample_rule: str | None,
     prefer_outcome: str,
 ) -> EventBundle:
-    prices, vwap, volume, buy_volume, sell_volume, high, low, open_ = load_event_ohlcv_resampled(
+    prices, vwap, volume, buy_volume_full, sell_volume_full, high, low, open_ = load_event_ohlcv_resampled(
         event_slug,
         resample_rule=resample_rule,
         prefer_outcome=prefer_outcome,
     )
-    try:
-        (
-            _p,
-            _v,
-            _vol,
-            buy_volume_full,
-            sell_volume_full,
-            _h,
-            _l,
-            _o,
-        ) = load_event_ohlcv_resampled(
-            event_slug,
-            resample_rule=resample_rule,
-            prefer_outcome=None,
-        )
-    except Exception:
-        buy_volume_full = buy_volume
-        sell_volume_full = sell_volume
 
     return {
         "prices": prices,
@@ -478,19 +508,6 @@ def main() -> None:
         ),
     )
 
-    rng = np.random.default_rng(args.seed)
-    _vprint(bool(args.verbose), "Beginning Monte Carlo trial execution")
-    trial_rows, best_score, best_params, interrupted = _run_trials_with_interrupt_handling(
-        target_trials=target_trials,
-        rules=rules,
-        base_params=base_params,
-        event_data=event_data,
-        rng=rng,
-        objective=args.objective,
-        rebalance_freq=int(args.rebalance_freq),
-        verbose=bool(args.verbose),
-    )
-
     timestamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d_%H%M%S")
     event_group = event_slugs[0] if len(event_slugs) == 1 else f"{len(event_slugs)}_events"
     out_dir = RESULTS_DIR / "weather_imbalance_mc" / event_group / timestamp
@@ -505,11 +522,31 @@ def main() -> None:
     summary_path = out_dir / "best_run_summary.json"
     best_trades_path = out_dir / "best_trades.csv"
 
-    trials_df = pd.DataFrame(trial_rows)
-    trials_df.to_csv(trials_path, index=False)
-
     top_n = max(1, int(args.top_n))
-    top_df = trials_df.nlargest(top_n, "_objective") if not trials_df.empty else trials_df
+    writer = _TrialCsvWriter(trials_path)
+    rng = np.random.default_rng(args.seed)
+
+    _vprint(bool(args.verbose), "Beginning Monte Carlo trial execution")
+    try:
+        n_trials_effective, best_score, best_params, interrupted, top_rows = _run_trials_with_interrupt_handling(
+            target_trials=target_trials,
+            rules=rules,
+            base_params=base_params,
+            event_data=event_data,
+            rng=rng,
+            objective=args.objective,
+            rebalance_freq=int(args.rebalance_freq),
+            verbose=bool(args.verbose),
+            trial_writer=writer,
+            top_n=top_n,
+        )
+    finally:
+        writer.close()
+
+    if top_rows:
+        top_df = pd.DataFrame(top_rows).nlargest(top_n, "_objective")
+    else:
+        top_df = pd.DataFrame()
     top_df.to_csv(top_path, index=False)
 
     best_params = dict(best_params or {})
@@ -536,6 +573,7 @@ def main() -> None:
             prices=bundle["prices"],
             strategy_kwargs=best_strategy_kwargs,
             rebalance_freq=int(best_params.get("rebalance_freq", args.rebalance_freq)),
+            collect_trades=True,
         )
         best_metrics_by_event[slug] = event_metrics
         if not event_trades.empty:
@@ -567,7 +605,7 @@ def main() -> None:
         "param_config": str(param_config_path),
         "objective": args.objective,
         "n_trials": int(args.n_trials),
-        "n_trials_effective": int(len(trials_df)),
+        "n_trials_effective": int(n_trials_effective),
         "max_possible_trials_by_step": max_possible_trials,
         "seed": int(args.seed),
         "resample_rule": resample_rule or "native",
@@ -592,7 +630,7 @@ def main() -> None:
     print(f"Events: {event_slugs}")
     print(f"Profile: {args.profile}")
     print(f"Objective: {args.objective}")
-    print(f"Trials run: {len(trials_df)} / requested {args.n_trials}")
+    print(f"Trials run: {n_trials_effective} / requested {args.n_trials}")
     if interrupted:
         print("Run interrupted by user. Partial results were saved.")
     if max_possible_trials is not None:
