@@ -56,11 +56,12 @@ class Strategy(ABC):
         """Pre-compute all declared indicators and store results in ``self.indicators``."""
         if not hasattr(self, "_ind_acc"):
             self._ind_acc: dict[str, list[tuple]] = {}
+        record_history = bool(getattr(self, "record_indicator_history", True))
         result: dict[str, Any] = {}
         for ind in self.indicator_defs:
             val = ind.compute(prices, returns, index)
             result[ind.name] = val
-            if isinstance(val, pd.Series):
+            if record_history and isinstance(val, pd.Series):
                 self._ind_acc.setdefault(ind.name, []).append((prices.index[index], val))
         self.indicators = result
 

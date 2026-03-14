@@ -99,6 +99,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
         use_trailing_stop: bool = False,
         min_sell_price: float | None = 0.05,
         max_buy_price: float | None = 0.95,
+        track_delta_history: bool = True,
     ):
         """Initialize the weather imbalance strategy.
 
@@ -176,6 +177,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
         self.sell_volume = sell_volume if sell_volume is not None else pd.DataFrame()
         self._buy_delta_cache: dict[str, tuple[str | None, str | None]] = {}
         self._sell_delta_cache: dict[str, tuple[str | None, str | None]] = {}
+        self.track_delta_history = bool(track_delta_history)
 
         # history of (index, asset, delta) whenever ``_buy_delta`` is called
         # during weight generation; useful for tests and debugging.
@@ -227,9 +229,6 @@ class WeatherMarketImbalanceStrategy(Strategy):
             low=_low,
             open_=_open,
         )
-        _cum_buy_delta = CumulativeYesNoDelta(volume_df=buy_volume, name="cum_buy_delta")
-        _cum_sell_delta = CumulativeYesNoDelta(volume_df=sell_volume, name="cum_sell_delta")
-        _cvd_buy_sd_thr = CvdSdThreshold(cum_delta_indicator=_cum_buy_delta, name="_cvd_buy_sd_thr")
         _vwap_indicator = Vwap(
             volume=_volume,
             pricing_method=pricing_method,
@@ -237,56 +236,101 @@ class WeatherMarketImbalanceStrategy(Strategy):
             low=_low,
             open_=_open,
         )
-        # Stop-loss and Take-profit indicator instances (helpers)
-        _stop_loss_indicator = StopLossIndicator(
-            sd_bands=_sd_bands,
-            vwap_indicator=_vwap_indicator,
-            mode=self.stop_loss_mode,
-            band_offset=self.sl_entry_band_offset,
+        needs_cvd = bool(
+            self.use_cvd_sd_gate
+            or self.use_buy_cvd_filter
+            or self.use_sell_cvd_filter
+            or self.track_delta_history
         )
-        _take_profit_indicator = TakeProfitIndicator(price_threshold=self.take_profit_price_threshold)
-        self.indicator_defs = [
-            _sd_bands,
-            _cum_buy_delta,
-            _cum_sell_delta,
-            _cvd_buy_sd_thr,
-            _vwap_indicator,
-            VwapSlope(
-                vwap=_vwap,
-                volume=_volume,
-                vwap_indicator=_vwap_indicator,
-                lookback=self.vwap_slope_lookback,
-                mode=self.vwap_slope_mode,
-                value_per_point=self.vwap_slope_value_per_point,
-                scale=self.vwap_slope_scale,
-            ),
-            VwapSlope(
-                vwap=_vwap,
-                volume=_volume,
-                vwap_indicator=_vwap_indicator,
-                lookback=self.vwap_slope_lookback,
-                mode="raw",
-                name="vwap_slope_raw",
-            ),
-            VwapVolumeImbalance(
-                vwap=_vwap,
-                volume=_volume,
-                vwap_indicator=_vwap_indicator,
-                lookback=self.vwap_volume_imbalance_lookback,
-            ),
-            BandPosition(
-                lookback_hours=lookback_hours,
-                lookback_bars=int(lookback) if lookback_hours is None else None,
-                sd_bands=_sd_bands,
-            ),
-            MeanReversion(
-                window=self.mean_reversion_window,
-                lookback_hours=lookback_hours,
-                lookback_bars=int(lookback) if lookback_hours is None else None,
-            ),
-            _stop_loss_indicator,
-            _take_profit_indicator,
-        ]
+        needs_sd_bands = bool(self.use_market_regime or self.use_stop_loss or self.use_trailing_stop)
+        needs_vwap = bool(
+            self.use_vwap_slope_filter
+            or self.use_vwap_volume_imbalance_filter
+            or self.use_stop_loss
+            or self.use_trailing_stop
+        )
+
+        self.indicator_defs = []
+        if needs_sd_bands:
+            self.indicator_defs.append(_sd_bands)
+
+        _cum_buy_delta = None
+        _cum_sell_delta = None
+        if needs_cvd:
+            _cum_buy_delta = CumulativeYesNoDelta(volume_df=buy_volume, name="cum_buy_delta")
+            _cum_sell_delta = CumulativeYesNoDelta(volume_df=sell_volume, name="cum_sell_delta")
+            self.indicator_defs.extend([_cum_buy_delta, _cum_sell_delta])
+            if self.use_cvd_sd_gate and _cum_buy_delta is not None:
+                self.indicator_defs.append(
+                    CvdSdThreshold(cum_delta_indicator=_cum_buy_delta, name="_cvd_buy_sd_thr")
+                )
+
+        if needs_vwap:
+            self.indicator_defs.append(_vwap_indicator)
+
+        if self.use_vwap_slope_filter:
+            self.indicator_defs.extend(
+                [
+                    VwapSlope(
+                        vwap=_vwap,
+                        volume=_volume,
+                        vwap_indicator=_vwap_indicator,
+                        lookback=self.vwap_slope_lookback,
+                        mode=self.vwap_slope_mode,
+                        value_per_point=self.vwap_slope_value_per_point,
+                        scale=self.vwap_slope_scale,
+                    ),
+                    VwapSlope(
+                        vwap=_vwap,
+                        volume=_volume,
+                        vwap_indicator=_vwap_indicator,
+                        lookback=self.vwap_slope_lookback,
+                        mode="raw",
+                        name="vwap_slope_raw",
+                    ),
+                ]
+            )
+
+        if self.use_vwap_volume_imbalance_filter:
+            self.indicator_defs.append(
+                VwapVolumeImbalance(
+                    vwap=_vwap,
+                    volume=_volume,
+                    vwap_indicator=_vwap_indicator,
+                    lookback=self.vwap_volume_imbalance_lookback,
+                )
+            )
+
+        if self.use_market_regime:
+            self.indicator_defs.extend(
+                [
+                    BandPosition(
+                        lookback_hours=lookback_hours,
+                        lookback_bars=int(lookback) if lookback_hours is None else None,
+                        sd_bands=_sd_bands,
+                    ),
+                    MeanReversion(
+                        window=self.mean_reversion_window,
+                        lookback_hours=lookback_hours,
+                        lookback_bars=int(lookback) if lookback_hours is None else None,
+                    ),
+                ]
+            )
+
+        if self.use_stop_loss or self.use_trailing_stop:
+            self.indicator_defs.append(
+                StopLossIndicator(
+                    sd_bands=_sd_bands,
+                    vwap_indicator=_vwap_indicator,
+                    mode=self.stop_loss_mode,
+                    band_offset=self.sl_entry_band_offset,
+                )
+            )
+
+        if self.use_take_profit:
+            self.indicator_defs.append(
+                TakeProfitIndicator(price_threshold=self.take_profit_price_threshold)
+            )
 
         self._positions: dict[str, dict[str, object]] = {}
         self.trade_log: list[dict[str, object]] = []
@@ -609,8 +653,9 @@ class WeatherMarketImbalanceStrategy(Strategy):
 
             buy_delta = _read_cum("cum_buy_delta")
             sell_delta = _read_cum("cum_sell_delta")
-            self.buy_delta_history.append((index, asset, buy_delta))
-            self.sell_delta_history.append((index, asset, sell_delta))
+            if self.track_delta_history:
+                self.buy_delta_history.append((index, asset, buy_delta))
+                self.sell_delta_history.append((index, asset, sell_delta))
 
             asset_window = prices.iloc[start : index + 1][asset].dropna().to_numpy(dtype=float)
             if len(asset_window) < max(2, self.lookback // 2):

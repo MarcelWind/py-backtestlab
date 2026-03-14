@@ -54,48 +54,61 @@ class Backtester:
             The `include_*` flags can be set to False to avoid materializing
             heavy outputs when only metrics are needed.
         """
-        returns = compute_returns(prices)
-        n_days = len(returns)
-        assets = returns.columns.tolist()
-        lookback = self.strategy.lookback
+        had_record_attr = hasattr(self.strategy, "record_indicator_history")
+        prev_record = getattr(self.strategy, "record_indicator_history", True)
+        if not include_indicator_signals:
+            setattr(self.strategy, "record_indicator_history", False)
 
-        portfolio_returns = []
-        weights_history = [] if include_weights else None
-        dates = []
+        try:
+            returns = compute_returns(prices)
+            n_days = len(returns)
+            assets = returns.columns.tolist()
+            lookback = self.strategy.lookback
 
-        current_weights = np.zeros(len(assets))
+            portfolio_returns = []
+            weights_history = [] if include_weights else None
+            dates = []
 
-        for i in range(lookback, n_days):
-            # Rebalance check
-            days_since_start = i - lookback
-            if days_since_start % self.rebalance_freq == 0:
-                self.strategy._compute_indicators(prices, returns, i)
-                current_weights = self.strategy.generate_weights(prices, returns, i)
+            current_weights = np.zeros(len(assets))
 
-            # Calculate portfolio return for this day
-            day_returns = returns.iloc[i].to_numpy()
-            port_return = float(np.dot(current_weights, day_returns))
+            for i in range(lookback, n_days):
+                # Rebalance check
+                days_since_start = i - lookback
+                if days_since_start % self.rebalance_freq == 0:
+                    self.strategy._compute_indicators(prices, returns, i)
+                    current_weights = self.strategy.generate_weights(prices, returns, i)
 
-            portfolio_returns.append(port_return)
+                # Calculate portfolio return for this day
+                day_returns = returns.iloc[i].to_numpy()
+                port_return = float(np.dot(current_weights, day_returns))
+
+                portfolio_returns.append(port_return)
+                if include_weights and weights_history is not None:
+                    weights_history.append(current_weights.copy())
+                dates.append(returns.index[i])
+
+            portfolio_returns = pd.Series(portfolio_returns, index=dates, name="portfolio")
+            result: dict[str, object] = {
+                "metrics": compute_metrics(portfolio_returns),
+            }
+
+            if include_returns:
+                result["returns"] = portfolio_returns
+
             if include_weights and weights_history is not None:
-                weights_history.append(current_weights.copy())
-            dates.append(returns.index[i])
+                result["weights"] = pd.DataFrame(weights_history, index=dates, columns=assets)
 
-        portfolio_returns = pd.Series(portfolio_returns, index=dates, name="portfolio")
-        result: dict[str, object] = {
-            "metrics": compute_metrics(portfolio_returns),
-        }
+            if include_indicator_signals:
+                result["indicator_signals"] = self.strategy.indicator_series
+            else:
+                acc = getattr(self.strategy, "_ind_acc", None)
+                if isinstance(acc, dict):
+                    acc.clear()
 
-        if include_returns:
-            result["returns"] = portfolio_returns
-
-        if include_weights and weights_history is not None:
-            result["weights"] = pd.DataFrame(weights_history, index=dates, columns=assets)
-
-        if include_indicator_signals:
-            result["indicator_signals"] = self.strategy.indicator_series
-
-        return result
+            return result
+        finally:
+            if had_record_attr:
+                setattr(self.strategy, "record_indicator_history", prev_record)
 
 
 # Backward compatibility alias

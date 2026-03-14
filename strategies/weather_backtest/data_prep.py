@@ -97,10 +97,23 @@ def pick_plot_frame(df: pd.DataFrame, prefer_outcome: str | None = None) -> pd.D
 
 
 def _load_event_rows(event_slug: str, prefer_outcome: str | None = None) -> pd.DataFrame:
-    df = load_zip()
-    df = df[df["event_slug"] == event_slug].copy()
-    if df.empty:
+    frames = []
+    with zipfile.ZipFile("data.zip", "r") as zf:
+        for name in zf.namelist():
+            parts = name.replace("\\", "/").split("/")
+            if len(parts) != 3 or not parts[2].endswith(".parquet") or parts[1] != event_slug:
+                continue
+            market = parts[2].removesuffix(".parquet")
+            df_part = pd.read_parquet(io.BytesIO(zf.read(name)))
+            df_part["event_slug"] = event_slug
+            df_part["market"] = market
+            frames.append(df_part)
+
+    if not frames:
         raise ValueError(f"No rows found for event_slug={event_slug!r}")
+
+    df = pd.concat(frames, ignore_index=True)
+    df = df.sort_values(["market", "timestamp"]).reset_index(drop=True)
 
     # Normalize market outcome suffixes and optionally filter to preferred outcome
     try:

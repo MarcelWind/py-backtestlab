@@ -15,13 +15,14 @@ Usage example:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import itertools
 import math
 import csv
 import sys
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 import numpy as np
 import pandas as pd
@@ -55,6 +56,18 @@ def _vprint(verbose: bool, message: str) -> None:
     """Print progress messages only when verbose mode is enabled."""
     if verbose:
         print(message, flush=True)
+
+
+def _to_float32_frame(df: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Downcast float64 columns to float32 to reduce resident memory."""
+    if df is None or df.empty:
+        return df
+    float_cols = list(df.select_dtypes(include=["float64"]).columns)
+    if not float_cols:
+        return df
+    out = df.copy()
+    out[float_cols] = out[float_cols].astype(np.float32)
+    return out
 
 
 def _metric_direction(metric: str) -> float:
@@ -302,6 +315,8 @@ def _run_trials_with_interrupt_handling(
                     f"[trial {trial_idx + 1}/{target_trials}] New best objective={best_score:.6f}",
                 )
 
+            if (trial_idx + 1) % 10 == 0:
+                gc.collect()
             if verbose and (trial_idx + 1) % 10 == 0:
                 print(f"Trial {trial_idx + 1}/{target_trials}: best objective={best_score:.6f}")
     except KeyboardInterrupt:
@@ -319,6 +334,8 @@ def _run_single_backtest(
     rebalance_freq: int,
     collect_trades: bool = True,
 ) -> tuple[dict[str, float], pd.DataFrame]:
+    strategy_kwargs = dict(strategy_kwargs)
+    strategy_kwargs.setdefault("track_delta_history", False)
     strategy = WeatherMarketImbalanceStrategy(**strategy_kwargs)
     result = Backtester(strategy=strategy, rebalance_freq=rebalance_freq).run(
         prices,
@@ -369,6 +386,15 @@ def _load_event_bundle(
         resample_rule=resample_rule,
         prefer_outcome=prefer_outcome,
     )
+
+    prices = cast(pd.DataFrame, _to_float32_frame(prices))
+    vwap = cast(pd.DataFrame, _to_float32_frame(vwap))
+    volume = cast(pd.DataFrame, _to_float32_frame(volume))
+    high = _to_float32_frame(high)
+    low = _to_float32_frame(low)
+    open_ = _to_float32_frame(open_)
+    buy_volume_full = _to_float32_frame(buy_volume_full)
+    sell_volume_full = _to_float32_frame(sell_volume_full)
 
     return {
         "prices": prices,
