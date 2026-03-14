@@ -1,0 +1,204 @@
+{
+  "parameters": [
+    {
+      "name": "use_market_regime",
+      "type": "bool",
+      "values": [true, false]
+    },
+    {
+      "name": "lookback_hours",
+      "type": "float",
+      "low": 3.0,
+      "high": 12.0,
+      "step": 3.0,
+        "enabled_if": {
+            "use_market_regime": true
+        }
+    },
+    {
+      "name": "mean_reversion_window",
+      "type": "int",
+      "low": 5,
+      "high": 5,
+      "step": 1,
+      "enabled_if": {
+        "use_market_regime": true
+      }
+    },
+    {
+      "name": "mean_reversion_threshold",
+      "type": "float",
+      "low": 0.5,
+      "high": 0.5,
+      "step": 0.01,
+        "enabled_if": {
+            "use_market_regime": true
+        }
+    },
+    {
+      "name": "imbalance_below_1sd_threshold",
+      "type": "float",
+      "low": 30.0,
+      "high": 50.0,
+      "step": 10.0,
+        "enabled_if": {
+            "use_market_regime": true
+        }
+    },
+    {
+      "name": "imbalance_down_above_mean_cap",
+      "type": "float",
+      "low": 10.0,
+      "high": 30.0,
+      "step": 10.0,
+        "enabled_if": {
+            "use_market_regime": true
+        }
+    },
+    {
+      "name": "balanced_within_1sd_threshold",
+      "type": "float",
+      "low": 65.0,
+      "high": 75.0,
+      "step": 5.0,
+        "enabled_if": {
+            "use_market_regime": true
+        }
+    },
+    {
+      "name": "use_vwap_slope_filter",
+      "type": "bool",
+      "values": [true, false]
+    },
+    {
+      "name": "vwap_slope_lookback",
+      "type": "int",
+      "low": 30,
+      "high": 60,
+      "step": 15,
+      "enabled_if": {
+        "use_vwap_slope_filter": true
+      }
+    },
+    {
+      "name": "max_vwap_slope",
+      "type": "float",
+      "low": -1.0,
+      "high": -1.0,
+      "step": 0.01,
+      "enabled_if": {
+        "use_vwap_slope_filter": true
+      }
+    },
+    {
+      "name": "vwap_slope_value_per_point",
+      "type": "log_float",
+      "low": 1e-6,
+      "high": 1e-1,
+      "step": 0,
+      "enabled_if": {
+        "use_vwap_slope_filter": true
+      }
+    },
+    {
+      "name": "vwap_slope_scale",
+      "type": "float",
+      "low": 1.0,
+      "high": 1.0,
+      "step": 0.1,
+      "enabled_if": {
+        "use_vwap_slope_filter": true
+      }
+    },
+    {
+      "name": "use_vwap_volume_imbalance_filter",
+      "type": "bool",
+      "values": [true, false]
+    },
+    {
+      "name": "vwap_volume_imbalance_lookback",
+      "type": "int",
+      "low": 30,
+      "high": 60,
+      "step": 15,
+      "enabled_if": {
+        "use_vwap_volume_imbalance_filter": true
+      }
+    },
+    {
+      "name": "max_vwap_volume_imbalance_pct",
+      "type": "float",
+      "low": -1.0,
+      "high": -1.0,
+      "step": 0.1,
+      "enabled_if": {
+        "use_vwap_volume_imbalance_filter": true
+      }
+    },
+    {
+      "name": "use_buy_cvd_filter",
+      "type": "bool",
+      "values": [true, false]
+    },
+    {
+      "name": "max_buy_cvd_for_short",
+      "type": "float",
+      "low": -2000.0,
+      "high": 0.0,
+      "step": 500.0,
+      "enabled_if": {
+        "use_buy_cvd_filter": true
+      }
+    },
+    {
+      "name": "use_sell_cvd_filter",
+      "type": "bool",
+      "values": [true, false]
+    },
+    {
+      "name": "min_sell_cvd_for_short",
+      "type": "float",
+      "low": 0.0,
+      "high": 1000.0,
+      "step": 500.0,
+      "enabled_if": {
+        "use_sell_cvd_filter": true
+      }
+    },
+    {
+      "name": "use_cvd_sd_gate",
+      "type": "bool",
+      "values": [true, false]
+    },
+    {
+      "name": "use_stop_loss",
+      "type": "bool",
+      "values": [true, false]
+    },
+    {
+      "name": "sl_entry_band_offset",
+      "type": "int",
+      "low": 1,
+      "high": 4,
+      "step": 1,
+      "enabled_if": {
+        "use_stop_loss": true
+      }
+    },
+    {
+      "name": "use_take_profit",
+      "type": "bool",
+      "values": [true, false]
+    },
+    {
+      "name": "take_profit_price_threshold",
+      "type": "float",
+      "low": 0.01,
+      "high": 0.01,
+      "step": 0.001,
+      "enabled_if": {
+        "use_take_profit": true
+      }
+    }
+  ]
+}

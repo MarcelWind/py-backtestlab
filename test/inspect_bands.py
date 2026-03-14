@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from strategies.weather_backtest import load_event_ohlcv_resampled
-from strategies.weather_market_imbalance import WeatherMarketImbalanceStrategy
+from strategies.weather_market_strategy import WeatherMarketImbalanceStrategy
 from stratlab.strategy.indicators import SdBands
 
 

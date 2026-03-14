@@ -39,14 +39,14 @@ def main() -> None:
     parser.add_argument(
         "--runner",
         default="",
-        help="Optional module to execute, e.g. 'strategies.run_weather_imbalance_smoke'",
+        help="Optional module to execute, e.g. 'strategies.run_weather_market_test'",
     )
     args = parser.parse_args()
 
     if not args.runner:
         print("No runner selected.")
         print("Example:")
-        print("  python run.py --runner strategies.run_weather_imbalance_smoke")
+        print("  python run.py --runner strategies.run_weather_market_test")
         return
 
     module = importlib.import_module(args.runner)

@@ -25,7 +25,7 @@ from stratlab.strategy.indicators import (
 
 
 # configuration file that holds the profile presets in JSON format
-_PRESETS_PATH = Path(__file__).with_name("weather_market_imbalance_presets.json")
+_PRESETS_PATH = Path(__file__).with_name("weather_market_presets.json")
 
 
 def _load_profile_presets() -> dict[str, dict[str, object]]:

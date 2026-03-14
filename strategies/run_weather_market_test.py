@@ -21,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from stratlab.backtest.backtester import Backtester
 from stratlab.config import RESULTS_DIR
 from strategies.weather_backtest import load_event_ohlcv_resampled, plot_entries_exits
-from strategies.weather_market_imbalance import WeatherMarketImbalanceStrategy
+from strategies.weather_market_strategy import WeatherMarketImbalanceStrategy
 
 
 def find_latest_backtest_dir(event_slug: str) -> Path | None:
