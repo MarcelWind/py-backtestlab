@@ -18,6 +18,7 @@ from stratlab.strategy.indicators import (
     CvdSdThreshold,
     StopLossIndicator,
     TakeProfitIndicator,
+    nearest_band_index,
 )
 
 
@@ -58,6 +59,9 @@ class WeatherMarketImbalanceStrategy(Strategy):
         use_market_regime: bool = True,
         allow_cash: bool = True,
         entry_regime: str = "Imb. Down",
+        side: str | None = None,
+        allow_longs: bool | None = None,
+        allow_shorts: bool | None = None,
         exit_mode: str = "hold_to_end",
         max_concurrent_positions: int | None = None,
         apply_global_position_cap: bool = False,
@@ -65,6 +69,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
         imbalance_above_mean_threshold: float = 60.0,
         imbalance_above_1sd_threshold: float = 40.0,
         imbalance_below_1sd_threshold: float = 50.0,
+        imbalance_up_below_mean_cap: float = 40.0,
         imbalance_down_above_mean_cap: float = 30.0,
         balanced_within_1sd_threshold: float = 70.0,
         mean_reversion_threshold: float = 0.5,
@@ -95,7 +100,12 @@ class WeatherMarketImbalanceStrategy(Strategy):
         stop_loss_mode: str = "band",
         sl_entry_band_offset: int = 1,
         use_take_profit: bool = False,
-        take_profit_price_threshold: float = 0.01,
+        take_profit_price_short: float = 0.01,
+        take_profit_price_long: float = 0.99,
+        # Backward-compatible aliases
+        take_profit_price_threshold_short: float | None = None,
+        take_profit_price_threshold_long: float | None = None,
+        take_profit_price_threshold: float | None = None,
         use_trailing_stop: bool = False,
         min_sell_price: float | None = 0.05,
         max_buy_price: float | None = 0.95,
@@ -110,6 +120,8 @@ class WeatherMarketImbalanceStrategy(Strategy):
             Larger -> smoother/slower signals; smaller -> faster/noisier signals.
         - imbalance_below_1sd_threshold: Minimum % of bars below -1sd to call Imb. Down.
             Larger -> stricter downside imbalance requirement.
+        - imbalance_up_below_mean_cap: Max % bars below mean for Imb. Up.
+            Smaller -> stricter upward imbalance requirement.
         - imbalance_down_above_mean_cap: Max % bars above mean for Imb. Down.
             Smaller -> stricter bearish condition.
         - use_vwap_slope_filter: Enables VWAP trend confirmation.
@@ -161,6 +173,26 @@ class WeatherMarketImbalanceStrategy(Strategy):
         self.use_market_regime = bool(use_market_regime)
         self.allow_cash = allow_cash
         self.entry_regime = entry_regime
+        self.side = str(side or "short").lower()
+        if self.side not in {"short", "long"}:
+            raise ValueError("side must be either 'short' or 'long'")
+
+        # New dual-side controls default to both enabled unless explicitly set.
+        self.allow_longs = True if allow_longs is None else bool(allow_longs)
+        self.allow_shorts = True if allow_shorts is None else bool(allow_shorts)
+
+        # Keep legacy side-only behavior compatible when only side is specified.
+        if allow_longs is None and allow_shorts is None and side is not None:
+            if self.side == "long":
+                self.allow_longs = True
+                self.allow_shorts = False
+            else:
+                self.allow_longs = False
+                self.allow_shorts = True
+
+        if not self.allow_longs and not self.allow_shorts:
+            raise ValueError("At least one of allow_longs/allow_shorts must be True")
+
         self.exit_mode = exit_mode
         self.max_concurrent_positions = max_concurrent_positions
         self.apply_global_position_cap = bool(apply_global_position_cap)
@@ -169,6 +201,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
         self.imbalance_above_mean_threshold = float(imbalance_above_mean_threshold)
         self.imbalance_above_1sd_threshold = float(imbalance_above_1sd_threshold)
         self.imbalance_below_1sd_threshold = float(imbalance_below_1sd_threshold)
+        self.imbalance_up_below_mean_cap = float(imbalance_up_below_mean_cap)
         self.imbalance_down_above_mean_cap = float(imbalance_down_above_mean_cap)
         self.balanced_within_1sd_threshold = float(balanced_within_1sd_threshold)
         self.mean_reversion_threshold = float(mean_reversion_threshold)
@@ -194,7 +227,23 @@ class WeatherMarketImbalanceStrategy(Strategy):
         self.sl_entry_band_offset = int(sl_entry_band_offset)
         self.use_take_profit = bool(use_take_profit)
         self.use_trailing_stop = bool(use_trailing_stop)
-        self.take_profit_price_threshold = float(take_profit_price_threshold)
+        # Preferred config keys are absolute prices per side:
+        # take_profit_price_short / take_profit_price_long.
+        # Keep legacy threshold keys as fallbacks for backward compatibility.
+        if take_profit_price_threshold is not None:
+            tp_short = float(take_profit_price_threshold)
+            tp_long = float(take_profit_price_threshold)
+        else:
+            if take_profit_price_threshold_short is not None:
+                tp_short = float(take_profit_price_threshold_short)
+            else:
+                tp_short = float(take_profit_price_short)
+            if take_profit_price_threshold_long is not None:
+                tp_long = float(take_profit_price_threshold_long)
+            else:
+                tp_long = float(take_profit_price_long)
+        self.take_profit_price_short = tp_short
+        self.take_profit_price_long = tp_long
         self.min_sell_price = None if min_sell_price is None else float(min_sell_price)
         self.max_buy_price = None if max_buy_price is None else float(max_buy_price)
 
@@ -229,6 +278,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
             low=_low,
             open_=_open,
         )
+        self._sd_bands = _sd_bands
         _vwap_indicator = Vwap(
             volume=_volume,
             pricing_method=pricing_method,
@@ -264,6 +314,8 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 self.indicator_defs.append(
                     CvdSdThreshold(cum_delta_indicator=_cum_buy_delta, name="_cvd_buy_sd_thr")
                 )
+        self._cum_buy_delta_indicator = _cum_buy_delta
+        self._cum_sell_delta_indicator = _cum_sell_delta
 
         if needs_vwap:
             self.indicator_defs.append(_vwap_indicator)
@@ -329,7 +381,10 @@ class WeatherMarketImbalanceStrategy(Strategy):
 
         if self.use_take_profit:
             self.indicator_defs.append(
-                TakeProfitIndicator(price_threshold=self.take_profit_price_threshold)
+                TakeProfitIndicator(
+                    price_short=self.take_profit_price_short,
+                    price_long=self.take_profit_price_long,
+                )
             )
 
         self._positions: dict[str, dict[str, object]] = {}
@@ -376,6 +431,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
         if (
             above_mean > self.imbalance_above_mean_threshold
             and above_1sd > self.imbalance_above_1sd_threshold
+            and (100.0 - above_mean) < self.imbalance_up_below_mean_cap
         ):
             return "Imb. Up", min(1.0, (above_mean - 50) / 50 + above_1sd / 100.0)
 
@@ -394,10 +450,49 @@ class WeatherMarketImbalanceStrategy(Strategy):
         return "Rotational", 0.5
 
     @staticmethod
-    def _short_trade_return(entry_price: float, current_price: float) -> float:
+    def _trade_return(entry_price: float, current_price: float, side: str) -> float:
         if entry_price <= 0:
             return 0.0
+        if side == "long":
+            return float(current_price / entry_price - 1.0)
         return float(entry_price / current_price - 1.0)
+
+    def _price_band_position(
+        self,
+        prices: pd.DataFrame,
+        index: int,
+        asset: str,
+        price_val: float,
+    ) -> float:
+        if not np.isfinite(price_val):
+            return float("nan")
+        if not hasattr(self, "_sd_bands") or self._sd_bands is None:
+            return float("nan")
+        try:
+            ts = prices.index[index]
+            bands = self._sd_bands.band_slice(asset, ts, ts)
+            if bands is None or bands.empty:
+                return float("nan")
+            idx = nearest_band_index(bands.iloc[-1], float(price_val))
+            if idx is None:
+                return float("nan")
+            return float(idx)
+        except Exception:
+            return float("nan")
+
+    def _cvd_band_position(
+        self,
+        indicator: CumulativeYesNoDelta | None,
+        asset: str,
+        index: int,
+        fallback_value: float,
+    ) -> float:
+        if indicator is None:
+            return float("nan")
+        try:
+            return float(indicator.band_position_at(asset, index, fallback_value=float(fallback_value)))
+        except Exception:
+            return float("nan")
 
     def _should_exit(self, asset: str, current_price: float, index: int, prices: pd.DataFrame) -> str | None:
         # Only skip exit checks when neither the exit_mode requests TP/SL
@@ -415,7 +510,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
         position = self._positions.get(asset)
         if position is None:
             return None
-        entry_price = float(cast(float, position.get("entry_price", 0.0)))
+        side = str(position.get("side", "short"))
 
         # Per-position TP/SL price checks (prefer absolute price thresholds)
         tp_price = position.get("tp_price", float("nan"))
@@ -424,20 +519,33 @@ class WeatherMarketImbalanceStrategy(Strategy):
         except Exception:
             tp_val = float("nan")
         if math.isfinite(tp_val):
-            # short: take profit when price falls to or below tp_price
-            # check intrabar low if available, otherwise use close
-            low_val = None
-            try:
-                if hasattr(self, "_low") and asset in self._low.columns:
-                    low_val = float(self._low.iloc[index][asset])
-            except Exception:
-                low_val = None
-            if low_val is not None and np.isfinite(low_val):
-                if low_val <= tp_val:
-                    return "take_profit"
+            # check intrabar extremes when available, otherwise use close
+            if side == "long":
+                high_val = None
+                try:
+                    if hasattr(self, "_high") and asset in self._high.columns:
+                        high_val = float(self._high.iloc[index][asset])
+                except Exception:
+                    high_val = None
+                if high_val is not None and np.isfinite(high_val):
+                    if high_val >= tp_val:
+                        return "take_profit"
+                else:
+                    if current_price >= tp_val:
+                        return "take_profit"
             else:
-                if current_price <= tp_val:
-                    return "take_profit"
+                low_val = None
+                try:
+                    if hasattr(self, "_low") and asset in self._low.columns:
+                        low_val = float(self._low.iloc[index][asset])
+                except Exception:
+                    low_val = None
+                if low_val is not None and np.isfinite(low_val):
+                    if low_val <= tp_val:
+                        return "take_profit"
+                else:
+                    if current_price <= tp_val:
+                        return "take_profit"
 
         stop_price = position.get("stop_price", float("nan"))
         try:
@@ -445,20 +553,33 @@ class WeatherMarketImbalanceStrategy(Strategy):
         except Exception:
             stop_val = float("nan")
         if math.isfinite(stop_val):
-            # short: stop-loss when price rises to or above stop_price
-            # check intrabar high if available, otherwise use close
-            high_val = None
-            try:
-                if hasattr(self, "_high") and asset in self._high.columns:
-                    high_val = float(self._high.iloc[index][asset])
-            except Exception:
-                high_val = None
-            if high_val is not None and np.isfinite(high_val):
-                if high_val >= stop_val:
-                    return "stop_loss"
+            # check intrabar extremes when available, otherwise use close
+            if side == "long":
+                low_val = None
+                try:
+                    if hasattr(self, "_low") and asset in self._low.columns:
+                        low_val = float(self._low.iloc[index][asset])
+                except Exception:
+                    low_val = None
+                if low_val is not None and np.isfinite(low_val):
+                    if low_val <= stop_val:
+                        return "stop_loss"
+                else:
+                    if current_price <= stop_val:
+                        return "stop_loss"
             else:
-                if current_price >= stop_val:
-                    return "stop_loss"
+                high_val = None
+                try:
+                    if hasattr(self, "_high") and asset in self._high.columns:
+                        high_val = float(self._high.iloc[index][asset])
+                except Exception:
+                    high_val = None
+                if high_val is not None and np.isfinite(high_val):
+                    if high_val >= stop_val:
+                        return "stop_loss"
+                else:
+                    if current_price >= stop_val:
+                        return "stop_loss"
 
         # No percentage-based fallback: only absolute TP/SL are enforced.
         return None
@@ -483,26 +604,65 @@ class WeatherMarketImbalanceStrategy(Strategy):
         vwap_volume_imbalance_pct = float(cast(float, position.get("vwap_volume_imbalance_pct", float("nan"))))
         buy_cvd = float(cast(float, position.get("buy_cvd", float("nan"))))
         sell_cvd = float(cast(float, position.get("sell_cvd", float("nan"))))
+        price_band_position_entry = float(
+            cast(float, position.get("price_band_position_entry", float("nan")))
+        )
+        buy_cvd_band_position_entry = float(
+            cast(float, position.get("buy_cvd_band_position_entry", float("nan")))
+        )
+        sell_cvd_band_position_entry = float(
+            cast(float, position.get("sell_cvd_band_position_entry", float("nan")))
+        )
         stop_price = float(cast(float, position.get("stop_price", float("nan"))))
         tp_price = float(cast(float, position.get("tp_price", float("nan"))))
+        side = str(position.get("side", "short"))
         # Prefer intrabar fill price when available for stop_loss / take_profit
         fill_price = float(current_price)
         try:
-            if reason == "stop_loss" and hasattr(self, "_high") and asset in self._high.columns:
-                hi = float(self._high.iloc[current_index][asset])
-                if np.isfinite(hi) and hi > 0:
-                    fill_price = hi
+            if reason == "stop_loss":
+                if side == "long" and hasattr(self, "_low") and asset in self._low.columns:
+                    lo = float(self._low.iloc[current_index][asset])
+                    if np.isfinite(lo) and lo > 0:
+                        fill_price = lo
+                if side == "short" and hasattr(self, "_high") and asset in self._high.columns:
+                    hi = float(self._high.iloc[current_index][asset])
+                    if np.isfinite(hi) and hi > 0:
+                        fill_price = hi
         except Exception:
             pass
         try:
-            if reason == "take_profit" and hasattr(self, "_low") and asset in self._low.columns:
-                lo = float(self._low.iloc[current_index][asset])
-                if np.isfinite(lo) and lo > 0:
-                    fill_price = lo
+            if reason == "take_profit":
+                if side == "long" and hasattr(self, "_high") and asset in self._high.columns:
+                    hi = float(self._high.iloc[current_index][asset])
+                    if np.isfinite(hi) and hi > 0:
+                        fill_price = hi
+                if side == "short" and hasattr(self, "_low") and asset in self._low.columns:
+                    lo = float(self._low.iloc[current_index][asset])
+                    if np.isfinite(lo) and lo > 0:
+                        fill_price = lo
         except Exception:
             pass
 
-        pnl = self._short_trade_return(entry_price, fill_price)
+        price_band_position_exit = self._price_band_position(
+            prices=prices,
+            index=current_index,
+            asset=asset,
+            price_val=float(current_price),
+        )
+        buy_cvd_band_position_exit = self._cvd_band_position(
+            indicator=getattr(self, "_cum_buy_delta_indicator", None),
+            asset=asset,
+            index=current_index,
+            fallback_value=buy_cvd,
+        )
+        sell_cvd_band_position_exit = self._cvd_band_position(
+            indicator=getattr(self, "_cum_sell_delta_indicator", None),
+            asset=asset,
+            index=current_index,
+            fallback_value=sell_cvd,
+        )
+
+        pnl = self._trade_return(entry_price, fill_price, side)
         self.trade_log.append(
             {
                 "asset": asset,
@@ -514,6 +674,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 "exit_price": float(fill_price),
                 "exit_reason": reason,
                 "pnl": pnl,
+                "side": side,
                 "regime": position.get("regime"),
                 "confidence": confidence,
                 "vwap_slope": vwap_slope,
@@ -521,6 +682,12 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 "vwap_volume_imbalance_pct": vwap_volume_imbalance_pct,
                 "buy_cvd": buy_cvd,
                 "sell_cvd": sell_cvd,
+                "price_band_position_entry": price_band_position_entry,
+                "price_band_position_exit": price_band_position_exit,
+                "buy_cvd_band_position_entry": buy_cvd_band_position_entry,
+                "buy_cvd_band_position_exit": buy_cvd_band_position_exit,
+                "sell_cvd_band_position_entry": sell_cvd_band_position_entry,
+                "sell_cvd_band_position_exit": sell_cvd_band_position_exit,
                 "stop_price": stop_price,
                 "tp_price": tp_price,
             }
@@ -583,7 +750,14 @@ class WeatherMarketImbalanceStrategy(Strategy):
                     if np.isnan(cur_price) or cur_price <= 0:
                         continue
                     try:
-                        new_stop = sl_obj.stop_price_for_entry(prices, index, asset, cur_price)
+                        pos_side = str(self._positions.get(asset, {}).get("side", "short"))
+                        new_stop = sl_obj.stop_price_for_entry(
+                            prices,
+                            index,
+                            asset,
+                            cur_price,
+                            side=pos_side,
+                        )
                         if np.isfinite(new_stop):
                             self._positions[asset]["stop_price"] = float(new_stop)
                     except Exception:
@@ -619,7 +793,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
             )
 
         # Entry checks on all assets
-        ranked_entries: list[tuple[str, float, float, float, float, float, float]] = []
+        ranked_entries: list[tuple[str, str, str, float, float, float, float, float, float]] = []
         # compute the window start used for market-regime and other indicators
         # but *do not* bail out early; we still want to observe buy-volume
         # delta on every bar.  previously the lookback logic returned before any
@@ -666,13 +840,28 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 if need_full_window:
                     continue
                 regime, confidence = self._classify_regime(asset)
-                if regime != self.entry_regime:
+
+                if regime == "Imb. Down":
+                    entry_side = "short"
+                elif regime == "Imb. Up":
+                    entry_side = "long"
+                else:
+                    continue
+
+                if entry_side == "long" and not self.allow_longs:
+                    continue
+                if entry_side == "short" and not self.allow_shorts:
                     continue
             else:
                 # market‑regime filtering disabled – allow everything through
                 # still supply a confidence for ranking purposes
                 regime = self.entry_regime
                 confidence = 0.5
+                entry_side = self.side
+                if entry_side == "long" and not self.allow_longs:
+                    continue
+                if entry_side == "short" and not self.allow_shorts:
+                    continue
 
             slope = 0.0
             raw_slope = 0.0
@@ -698,74 +887,140 @@ class WeatherMarketImbalanceStrategy(Strategy):
                         thr = float("nan")
 
                 if math.isfinite(thr):
-                    if (not math.isfinite(buy_delta)) or buy_delta >= thr:
-                        logger.debug(
-                            "%s @ %s: buy CVD = %s must be < -3sd=%s – skipping",
-                            asset,
-                            current_ts,
-                            buy_delta,
-                            thr,
-                        )
-                        continue
+                    if entry_side == "short":
+                        if (not math.isfinite(buy_delta)) or buy_delta >= thr:
+                            logger.debug(
+                                "%s @ %s: buy CVD = %s must be < -3sd=%s – skipping",
+                                asset,
+                                current_ts,
+                                buy_delta,
+                                thr,
+                            )
+                            continue
+                    else:
+                        long_thr = abs(thr)
+                        if (not math.isfinite(buy_delta)) or buy_delta <= long_thr:
+                            logger.debug(
+                                "%s @ %s: buy CVD = %s must be > +3sd=%s – skipping",
+                                asset,
+                                current_ts,
+                                buy_delta,
+                                long_thr,
+                            )
+                            continue
                 else:
+                    if entry_side == "short":
+                        if (not math.isfinite(buy_delta)) or buy_delta >= self.max_buy_cvd_for_short:
+                            logger.debug(
+                                "%s @ %s: buy CVD = %s must be < max_buy_cvd_for_short=%s (no sd threshold) – skipping",
+                                asset,
+                                current_ts,
+                                buy_delta,
+                                self.max_buy_cvd_for_short,
+                            )
+                            continue
+                    else:
+                        if (not math.isfinite(buy_delta)) or buy_delta <= self.max_buy_cvd_for_short:
+                            logger.debug(
+                                "%s @ %s: buy CVD = %s must be > max_buy_cvd_for_short=%s (no sd threshold) – skipping",
+                                asset,
+                                current_ts,
+                                buy_delta,
+                                self.max_buy_cvd_for_short,
+                            )
+                            continue
+            
+            if self.use_buy_cvd_filter:
+                if entry_side == "short":
                     if (not math.isfinite(buy_delta)) or buy_delta >= self.max_buy_cvd_for_short:
                         logger.debug(
-                            "%s @ %s: buy CVD = %s must be < max_buy_cvd_for_short=%s (no sd threshold) – skipping",
+                            "%s @ %s: buy CVD = %s must be < max_buy_cvd_for_short=%s – skipping",
                             asset,
                             current_ts,
                             buy_delta,
                             self.max_buy_cvd_for_short,
                         )
                         continue
-            
-            if self.use_buy_cvd_filter:
-                if (not math.isfinite(buy_delta)) or buy_delta >= self.max_buy_cvd_for_short:
-                    logger.debug(
-                        "%s @ %s: buy CVD = %s must be < max_buy_cvd_for_short=%s – skipping",
-                        asset,
-                        current_ts,
-                        buy_delta,
-                        self.max_buy_cvd_for_short,
-                    )
-                    continue
+                else:
+                    if (not math.isfinite(buy_delta)) or buy_delta <= self.max_buy_cvd_for_short:
+                        logger.debug(
+                            "%s @ %s: buy CVD = %s must be > max_buy_cvd_for_short=%s – skipping",
+                            asset,
+                            current_ts,
+                            buy_delta,
+                            self.max_buy_cvd_for_short,
+                        )
+                        continue
 
             if self.use_sell_cvd_filter:
-                if (not math.isfinite(sell_delta)) or sell_delta <= self.min_sell_cvd_for_short:
-                    logger.debug(
-                        "%s @ %s: sell CVD = %s must be > min_sell_cvd_for_short=%s – skipping",
-                        asset,
-                        current_ts,
-                        sell_delta,
-                        self.min_sell_cvd_for_short,
-                    )
-                    continue
+                if entry_side == "short":
+                    if (not math.isfinite(sell_delta)) or sell_delta <= self.min_sell_cvd_for_short:
+                        logger.debug(
+                            "%s @ %s: sell CVD = %s must be > min_sell_cvd_for_short=%s – skipping",
+                            asset,
+                            current_ts,
+                            sell_delta,
+                            self.min_sell_cvd_for_short,
+                        )
+                        continue
+                else:
+                    if (not math.isfinite(sell_delta)) or sell_delta >= self.min_sell_cvd_for_short:
+                        logger.debug(
+                            "%s @ %s: sell CVD = %s must be < min_sell_cvd_for_short=%s – skipping",
+                            asset,
+                            current_ts,
+                            sell_delta,
+                            self.min_sell_cvd_for_short,
+                        )
+                        continue
 
             # asset passed all filters – add to ranking list
-            ranked_entries.append((asset, confidence, slope, raw_slope, imbalance_pct, buy_delta, sell_delta))
+            ranked_entries.append(
+                (
+                    asset,
+                    entry_side,
+                    regime,
+                    confidence,
+                    slope,
+                    raw_slope,
+                    imbalance_pct,
+                    buy_delta,
+                    sell_delta,
+                )
+            )
 
-        ranked_entries.sort(key=lambda x: x[1], reverse=True)
+        ranked_entries.sort(key=lambda x: x[3], reverse=True)
 
         if self.apply_global_position_cap and self.max_concurrent_positions is not None:
             capacity = max(0, self.max_concurrent_positions - len(self._positions))
             ranked_entries = ranked_entries[:capacity]
 
-        for asset, confidence, slope, raw_slope, imbalance_pct, buy_delta_entry, sell_delta_entry in ranked_entries:
+        for (
+            asset,
+            entry_side,
+            entry_regime,
+            confidence,
+            slope,
+            raw_slope,
+            imbalance_pct,
+            buy_delta_entry,
+            sell_delta_entry,
+        ) in ranked_entries:
             if asset in self._positions:
                 continue
             entry_price = float(prices.iloc[index][asset])
             if np.isnan(entry_price) or entry_price <= 0:
                 continue
             # Enforce min/max price guards to avoid re-entries at near-zero prices
-            if self.min_sell_price is not None:
-                # this strategy opens shorts (sells) — skip if price below min_sell_price
+            if entry_side == "short" and self.min_sell_price is not None:
                 if entry_price < self.min_sell_price:
                     continue
-            if self.max_buy_price is not None:
-                # if strategy allowed longs, skip if price above max_buy_price
+            if entry_side == "long" and self.max_buy_price is not None:
                 if entry_price > self.max_buy_price:
                     continue
             logger.debug(
-                "opening short %s @ %s price=%.5f buy_cvd=%.2f sell_cvd=%.2f",
+                "opening %s %s @ %s price=%.5f buy_cvd=%.2f sell_cvd=%.2f",
+                entry_side,
                 asset,
                 current_ts,
                 entry_price,
@@ -786,7 +1041,13 @@ class WeatherMarketImbalanceStrategy(Strategy):
                         continue
                 if sl_obj is not None:
                     try:
-                        stop_price = sl_obj.stop_price_for_entry(prices, index, asset, entry_price)
+                        stop_price = sl_obj.stop_price_for_entry(
+                            prices,
+                            index,
+                            asset,
+                            entry_price,
+                            side=entry_side,
+                        )
                     except Exception:
                         stop_price = float("nan")
 
@@ -802,7 +1063,13 @@ class WeatherMarketImbalanceStrategy(Strategy):
                         continue
                 if tp_obj is not None:
                     try:
-                        tp_price = tp_obj.threshold_for_entry(prices, index, asset, entry_price)
+                        tp_price = tp_obj.threshold_for_entry(
+                            prices,
+                            index,
+                            asset,
+                            entry_price,
+                            side=entry_side,
+                        )
                     except Exception:
                         tp_price = float("nan")
 
@@ -810,27 +1077,47 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 "entry_price": entry_price,
                 "entry_index": int(index),
                 "entry_time": prices.index[index],
-                "regime": self.entry_regime,
+                "side": entry_side,
+                "regime": entry_regime,
                 "confidence": float(confidence),
                 "vwap_slope": float(slope),
                 "vwap_slope_raw": float(raw_slope),
                 "vwap_volume_imbalance_pct": float(imbalance_pct),
                 "buy_cvd": float(buy_delta_entry),
                 "sell_cvd": float(sell_delta_entry),
+                "price_band_position_entry": self._price_band_position(
+                    prices=prices,
+                    index=index,
+                    asset=asset,
+                    price_val=entry_price,
+                ),
+                "buy_cvd_band_position_entry": self._cvd_band_position(
+                    indicator=getattr(self, "_cum_buy_delta_indicator", None),
+                    asset=asset,
+                    index=index,
+                    fallback_value=float(buy_delta_entry),
+                ),
+                "sell_cvd_band_position_entry": self._cvd_band_position(
+                    indicator=getattr(self, "_cum_sell_delta_indicator", None),
+                    asset=asset,
+                    index=index,
+                    fallback_value=float(sell_delta_entry),
+                ),
                 "stop_price": stop_price,
                 "tp_price": tp_price,
             }
 
-        # Build short-only weight vector
+        # Build side-aware weight vector
         weights = np.zeros(len(assets), dtype=float)
         open_assets = [a for a in assets if a in self._positions]
         if not open_assets:
             return weights
 
-        short_weight = -1.0 / len(open_assets)
+        unit_weight = 1.0 / len(open_assets)
         for i, asset in enumerate(assets):
             if asset in self._positions:
-                weights[i] = short_weight
+                pos_side = str(self._positions[asset].get("side", "short"))
+                weights[i] = unit_weight if pos_side == "long" else -unit_weight
 
         # allow_cash retained for future behavior; currently unused because
         # short weights are normalized over active shorts only.

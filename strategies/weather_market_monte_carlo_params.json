@@ -1,6 +1,16 @@
 {
   "parameters": [
     {
+      "name": "allow_longs",
+      "type": "bool",
+      "values": [true, false]
+    },
+    {
+      "name": "allow_shorts",
+      "type": "bool",
+      "values": [true, false]
+    },
+    {
       "name": "use_market_regime",
       "type": "bool",
       "values": [true, false]
@@ -191,10 +201,20 @@
       "values": [true, false]
     },
     {
-      "name": "take_profit_price_threshold",
+      "name": "take_profit_price_short",
       "type": "float",
       "low": 0.01,
       "high": 0.01,
+      "step": 0.001,
+      "enabled_if": {
+        "use_take_profit": true
+      }
+    },
+    {
+      "name": "take_profit_price_long",
+      "type": "float",
+      "low": 0.99,
+      "high": 0.99,
       "step": 0.001,
       "enabled_if": {
         "use_take_profit": true

@@ -136,6 +136,7 @@ def plot_candles(
     width: float | None = None,
     up_color: str = "tab:blue",
     down_color: str = "tab:black",
+    bar_colors: pd.Series | None = None,
     linewidth: float = 0.6,
     alpha: float = 0.9,
 ):
@@ -163,7 +164,14 @@ def plot_candles(
 
     dates = mdates.date2num(pd.to_datetime(opens.index))
 
-    for dt_num, o, h, l, c in zip(dates, opens.values, highs.values, lows.values, closes.values):
+    colors = None
+    if bar_colors is not None:
+        try:
+            colors = bar_colors.reindex(opens.index)
+        except Exception:
+            colors = None
+
+    for i, (dt_num, o, h, l, c) in enumerate(zip(dates, opens.values, highs.values, lows.values, closes.values)):
         # wick
         line = Line2D([dt_num, dt_num], [l, h], color="black", linewidth=linewidth, zorder=1)
         ax.add_line(line)
@@ -172,6 +180,13 @@ def plot_candles(
         bottom = min(o, c)
         height = abs(c - o)
         color = up_color if c >= o else down_color
+        if colors is not None:
+            try:
+                c_override = colors.iloc[i]
+                if isinstance(c_override, str) and c_override:
+                    color = c_override
+            except Exception:
+                pass
 
         # If height is zero, draw a thin line instead of rectangle to remain visible
         if height <= 0:
@@ -1149,6 +1164,7 @@ def draw_regime_overlays(
     bands: pd.DataFrame,
     window_hours: dict,
     window_colors: dict,
+    draw_lines: bool = True,
 ) -> str:
     """Overlay colored line segments for each lookback window on the price axis.
 
@@ -1180,7 +1196,7 @@ def draw_regime_overlays(
         else:
             sub = mdf[(mdf["timestamp"] >= start_time) & (mdf["timestamp"] < end_time)]
         prev_hours = wh
-        if len(sub) < 2:
+        if len(sub) < 2 or not draw_lines:
             continue
         ax.plot(
             sub["timestamp"], sub["price"],
@@ -1259,11 +1275,35 @@ def draw_trade_markers(ax, market_trades: pd.DataFrame, highs: pd.Series | None 
     """
     if market_trades.empty:
         return "trades=0"
-    # Entry markers (vectorized)
-    ax.scatter(
-        pd.to_datetime(market_trades["entry_time"]), market_trades["entry_price"],
-        marker="v", s=36, color="#FF0000", edgecolors="black", linewidths=0.8, zorder=8,
-    )
+    # Entry markers (vectorized, side-aware)
+    entry_times = pd.to_datetime(market_trades["entry_time"])
+    entry_prices = market_trades["entry_price"].to_numpy(dtype=float)
+    entry_sides = market_trades.get("side", pd.Series("short", index=market_trades.index)).astype(str).str.lower()
+    long_mask = entry_sides.eq("long").to_numpy(dtype=bool)
+    short_mask = ~long_mask
+
+    if long_mask.any():
+        ax.scatter(
+            entry_times[long_mask],
+            entry_prices[long_mask],
+            marker="^",
+            s=36,
+            color="#2E8B57",
+            edgecolors="black",
+            linewidths=0.8,
+            zorder=8,
+        )
+    if short_mask.any():
+        ax.scatter(
+            entry_times[short_mask],
+            entry_prices[short_mask],
+            marker="v",
+            s=36,
+            color="#FF0000",
+            edgecolors="black",
+            linewidths=0.8,
+            zorder=8,
+        )
 
     # Exit markers and connecting lines: draw per-trade so we can override
     # plotted exit price when an intrabar high/low should be used (e.g., stop hit).
@@ -1271,23 +1311,41 @@ def draw_trade_markers(ax, market_trades: pd.DataFrame, highs: pd.Series | None 
         exit_time = pd.to_datetime(tr["exit_time"]) if pd.notna(tr.get("exit_time", None)) else None
         plotted_exit_price = tr.get("exit_price", None)
 
-        # Prefer intrabar high for stop_loss exits when available
-        if exit_time is not None and tr.get("exit_reason", "") == "stop_loss" and highs is not None:
-            try:
-                hi = highs.reindex([exit_time]).iloc[0]
-                if pd.notna(hi):
-                    plotted_exit_price = float(hi)
-            except Exception:
-                pass
+        side = str(tr.get("side", "short")).lower()
+        reason = str(tr.get("exit_reason", ""))
 
-        # Prefer intrabar low for take_profit exits when available
-        if exit_time is not None and tr.get("exit_reason", "") == "take_profit" and lows is not None:
-            try:
-                lo = lows.reindex([exit_time]).iloc[0]
-                if pd.notna(lo):
-                    plotted_exit_price = float(lo)
-            except Exception:
-                pass
+        # Prefer side-aware intrabar extremes when available
+        if exit_time is not None and reason == "stop_loss":
+            if side == "long" and lows is not None:
+                try:
+                    lo = lows.reindex([exit_time]).iloc[0]
+                    if pd.notna(lo):
+                        plotted_exit_price = float(lo)
+                except Exception:
+                    pass
+            if side != "long" and highs is not None:
+                try:
+                    hi = highs.reindex([exit_time]).iloc[0]
+                    if pd.notna(hi):
+                        plotted_exit_price = float(hi)
+                except Exception:
+                    pass
+
+        if exit_time is not None and reason == "take_profit":
+            if side == "long" and highs is not None:
+                try:
+                    hi = highs.reindex([exit_time]).iloc[0]
+                    if pd.notna(hi):
+                        plotted_exit_price = float(hi)
+                except Exception:
+                    pass
+            if side != "long" and lows is not None:
+                try:
+                    lo = lows.reindex([exit_time]).iloc[0]
+                    if pd.notna(lo):
+                        plotted_exit_price = float(lo)
+                except Exception:
+                    pass
 
         # draw exit marker and connecting line
         if exit_time is not None and plotted_exit_price is not None and pd.notna(plotted_exit_price):

@@ -39,6 +39,7 @@ from strategies.weather_backtest import load_event_ohlcv_resampled
 from strategies.weather_market_strategy import WeatherMarketImbalanceStrategy
 
 _PARAM_CONFIG_PATH = Path(__file__).with_name("weather_market_monte_carlo_params.json")
+_EMPTY_TRADES_DF = pd.DataFrame()
 
 
 class EventBundle(TypedDict):
@@ -345,7 +346,7 @@ def _run_single_backtest(
     )
     strategy.finalize(prices)
     metrics = {k: float(v) for k, v in result["metrics"].items()}
-    trades_df = pd.DataFrame(strategy.trade_log) if collect_trades else pd.DataFrame()
+    trades_df = pd.DataFrame(strategy.trade_log) if collect_trades else _EMPTY_TRADES_DF
     strategy.trade_log.clear()
     return metrics, trades_df
 
@@ -477,6 +478,18 @@ def main() -> None:
         action="store_true",
         help="Print optimization progress.",
     )
+    parser.add_argument(
+        "--allow-longs",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override preset allow_longs flag for this run.",
+    )
+    parser.add_argument(
+        "--allow-shorts",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override preset allow_shorts flag for this run.",
+    )
     args = parser.parse_args()
 
     if args.n_trials <= 0:
@@ -515,6 +528,10 @@ def main() -> None:
         )
 
     base_params = WeatherMarketImbalanceStrategy.profile_params(args.profile)
+    if args.allow_longs is not None:
+        base_params["allow_longs"] = bool(args.allow_longs)
+    if args.allow_shorts is not None:
+        base_params["allow_shorts"] = bool(args.allow_shorts)
     param_config_path = Path(args.param_config)
     if not param_config_path.is_absolute():
         param_config_path = PROJECT_ROOT / param_config_path
@@ -582,7 +599,8 @@ def main() -> None:
     # Merge optimized values on top of the selected profile and run once more
     # to capture finalized trades (including end-of-data closes).
     best_metrics_by_event: dict[str, dict[str, float]] = {}
-    all_best_trades: list[pd.DataFrame] = []
+    best_trades_rows = 0
+    best_trades_header_written = False
     for slug, bundle in event_data.items():
         _vprint(bool(args.verbose), f"Re-running best parameters for '{slug}'")
         best_strategy_kwargs = dict(base_params)
@@ -605,18 +623,22 @@ def main() -> None:
         if not event_trades.empty:
             event_trades = event_trades.copy()
             event_trades["event_slug"] = slug
-            all_best_trades.append(event_trades)
+            event_trades.to_csv(
+                best_trades_path,
+                mode="a",
+                index=False,
+                header=(not best_trades_header_written),
+            )
+            best_trades_header_written = True
+            best_trades_rows += int(len(event_trades))
         event_trades.to_csv(per_event_dir / f"{slug}.csv", index=False)
         _vprint(
             bool(args.verbose),
             f"Saved per-event best trades for '{slug}' ({len(event_trades)} rows)",
         )
 
-    if all_best_trades:
-        best_trades = pd.concat(all_best_trades, ignore_index=True)
-    else:
-        best_trades = pd.DataFrame()
-    best_trades.to_csv(best_trades_path, index=False)
+    if not best_trades_header_written:
+        pd.DataFrame().to_csv(best_trades_path, index=False)
 
     aggregate_best_metrics: dict[str, float] = {}
     if best_metrics_by_event:
@@ -644,7 +666,7 @@ def main() -> None:
     summary_payload = {
         "best_metrics_mean": aggregate_best_metrics,
         "best_metrics_by_event": best_metrics_by_event,
-        "n_best_trades": int(len(best_trades)),
+        "n_best_trades": int(best_trades_rows),
         "output_dir": str(out_dir),
         "trials_file": trials_path.name,
         "top_trials_file": top_path.name,

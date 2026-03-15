@@ -253,6 +253,18 @@ def main() -> None:
         action="store_true",
         help="Print signal statistics and timing breakdown",
     )
+    parser.add_argument(
+        "--allow-longs",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override preset allow_longs flag.",
+    )
+    parser.add_argument(
+        "--allow-shorts",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override preset allow_shorts flag.",
+    )
     args = parser.parse_args()
 
     event_slug = args.event_slug
@@ -277,6 +289,13 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     active_profile_params = WeatherMarketImbalanceStrategy.profile_params(args.profile)
+    strategy_overrides: dict[str, object] = {}
+    if args.allow_longs is not None:
+        strategy_overrides["allow_longs"] = bool(args.allow_longs)
+    if args.allow_shorts is not None:
+        strategy_overrides["allow_shorts"] = bool(args.allow_shorts)
+    if strategy_overrides:
+        active_profile_params.update(strategy_overrides)
     all_summary_rows: list[dict[str, object]] = []
 
     print(f"Loaded event target: {event_slug}")
@@ -311,6 +330,7 @@ def main() -> None:
         open_=open_,
         buy_volume=buy_volume_full,
         sell_volume=sell_volume_full,
+        **strategy_overrides,
     )
     backtester = Backtester(strategy=strategy, rebalance_freq=1)
     started = time.perf_counter()
@@ -350,21 +370,38 @@ def main() -> None:
                 continue
             asset = row.get("asset")
             reason = str(row.get("exit_reason", ""))
+            side = str(row.get("side", "short"))
             chosen = None
-            if reason == "stop_loss" and high_df is not None and asset in high_df.columns:
-                try:
-                    val = high_df[asset].reindex([et]).iloc[0]
-                    if pd.notna(val):
-                        chosen = float(val)
-                except Exception:
-                    pass
-            if reason == "take_profit" and low_df is not None and asset in low_df.columns:
-                try:
-                    val = low_df[asset].reindex([et]).iloc[0]
-                    if pd.notna(val):
-                        chosen = float(val)
-                except Exception:
-                    pass
+            if reason == "stop_loss":
+                if side == "long" and low_df is not None and asset in low_df.columns:
+                    try:
+                        val = low_df[asset].reindex([et]).iloc[0]
+                        if pd.notna(val):
+                            chosen = float(val)
+                    except Exception:
+                        pass
+                if side != "long" and high_df is not None and asset in high_df.columns:
+                    try:
+                        val = high_df[asset].reindex([et]).iloc[0]
+                        if pd.notna(val):
+                            chosen = float(val)
+                    except Exception:
+                        pass
+            if reason == "take_profit":
+                if side == "long" and high_df is not None and asset in high_df.columns:
+                    try:
+                        val = high_df[asset].reindex([et]).iloc[0]
+                        if pd.notna(val):
+                            chosen = float(val)
+                    except Exception:
+                        pass
+                if side != "long" and low_df is not None and asset in low_df.columns:
+                    try:
+                        val = low_df[asset].reindex([et]).iloc[0]
+                        if pd.notna(val):
+                            chosen = float(val)
+                    except Exception:
+                        pass
             if chosen is not None:
                 df.at[idx, "exit_price"] = chosen
         return df

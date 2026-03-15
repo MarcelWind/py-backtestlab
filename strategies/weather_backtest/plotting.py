@@ -128,23 +128,49 @@ def _overlay_entry_markers(
     series: pd.Series,
     zorder: int = 7,
 ) -> None:
-    """Overlay short-entry markers using the shared _entry_markers helper."""
+    """Overlay side-aware entry markers using the shared _entry_markers helper."""
     entry_times, entry_vals = _entry_markers(market_trades, series)
     if entry_times is None or entry_vals is None:
         return
     valid = np.isfinite(entry_vals)
     if not valid.any():
         return
-    ax.scatter(
-        pd.DatetimeIndex(entry_times)[valid],
-        np.asarray(entry_vals, dtype=float)[valid],
-        marker="v",
-        s=22,
-        color="#FF0000",
-        edgecolors="black",
-        linewidths=0.7,
-        zorder=zorder,
+    valid_times = pd.DatetimeIndex(entry_times)[valid]
+    valid_vals = np.asarray(entry_vals, dtype=float)[valid]
+
+    side_series = (
+        market_trades.get("side", pd.Series("short", index=market_trades.index))
+        .astype(str)
+        .str.lower()
     )
+    side_by_time = pd.Series(side_series.values, index=pd.to_datetime(market_trades["entry_time"]))
+    sides = side_by_time.reindex(valid_times).fillna("short")
+
+    long_mask = sides.eq("long").to_numpy(dtype=bool)
+    short_mask = ~long_mask
+
+    if long_mask.any():
+        ax.scatter(
+            valid_times[long_mask],
+            valid_vals[long_mask],
+            marker="^",
+            s=22,
+            color="#2E8B57",
+            edgecolors="black",
+            linewidths=0.7,
+            zorder=zorder,
+        )
+    if short_mask.any():
+        ax.scatter(
+            valid_times[short_mask],
+            valid_vals[short_mask],
+            marker="v",
+            s=22,
+            color="#FF0000",
+            edgecolors="black",
+            linewidths=0.7,
+            zorder=zorder,
+        )
 
 def _draw_price_panel(
     ax,
@@ -163,6 +189,23 @@ def _draw_price_panel(
     opens: pd.Series | None = None,
 ) -> None:
     """Draw panel 0: price + SD bands + VWAP + volume + regime overlays + trade markers + title."""
+    regime_bar_colors: pd.Series | None = None
+    try:
+        final_ts = pd.Timestamp(series.index.max())
+        regime_bar_colors = pd.Series(index=series.index, dtype="object")
+        prev_hours = 0
+        for wh in sorted(WINDOW_HOURS):
+            start_time = final_ts - pd.Timedelta(hours=wh)
+            end_time = final_ts - pd.Timedelta(hours=prev_hours)
+            if prev_hours == 0:
+                mask = (series.index >= start_time) & (series.index <= end_time)
+            else:
+                mask = (series.index >= start_time) & (series.index < end_time)
+            regime_bar_colors.loc[mask] = WINDOW_COLORS.get(wh, "gray")
+            prev_hours = wh
+    except Exception:
+        regime_bar_colors = None
+
     # If intrabar highs/lows are provided, render candlesticks. Prefer an
     # explicit `opens` series if supplied; otherwise fall back to prior-close.
     if highs is not None and lows is not None:
@@ -195,14 +238,25 @@ def _draw_price_panel(
             opens=o_s,
             highs=highs,
             lows=lows,
-            candle_kwargs={"up_color": "#2ca02c", "down_color": "#d62728"},
+            candle_kwargs={
+                "up_color": "#2ca02c",
+                "down_color": "#d62728",
+                "bar_colors": regime_bar_colors,
+            },
         )
     else:
         draw_price_sd_volume_panel(ax, series, bands_full, vwap_s=vwap_s, vol_s=vol_s,
                                    bar_width_days=bar_width_days)
 
     window_hours_dict = {wh: f"T-{wh}h" for wh in WINDOW_HOURS}
-    windows_str = draw_regime_overlays(ax, mdf, bands_full, window_hours_dict, WINDOW_COLORS)
+    windows_str = draw_regime_overlays(
+        ax,
+        mdf,
+        bands_full,
+        window_hours_dict,
+        WINDOW_COLORS,
+        draw_lines=False,
+    )
     # draw trade markers, prefer intrabar highs/lows when available
     trade_info = draw_trade_markers(ax, market_trades, highs=highs, lows=lows)
 

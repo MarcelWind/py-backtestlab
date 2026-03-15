@@ -181,6 +181,55 @@ def _lookback_window_start(
     return max(0, index - bars + 1)
 
 
+def build_band_row(mean_val: float, std_val: float) -> pd.Series:
+    """Create a standard SD-band row with mean and +/-{1,2,3}sd levels."""
+    m = float(mean_val)
+    s = float(std_val)
+    return pd.Series(
+        {
+            "mean": m,
+            "+1sd": m + s,
+            "-1sd": m - s,
+            "+2sd": m + 2.0 * s,
+            "-2sd": m - 2.0 * s,
+            "+3sd": m + 3.0 * s,
+            "-3sd": m - 3.0 * s,
+        },
+        dtype=float,
+    )
+
+
+def nearest_band_index(band_row: pd.Series, value: float) -> int | None:
+    """Map *value* to nearest SD-band index in [-3, 3]."""
+    if not np.isfinite(value):
+        return None
+    mapping = {
+        "mean": 0,
+        "+1sd": 1,
+        "+2sd": 2,
+        "+3sd": 3,
+        "-1sd": -1,
+        "-2sd": -2,
+        "-3sd": -3,
+    }
+    best = None
+    best_idx = None
+    for label, idx in mapping.items():
+        if label not in band_row.index:
+            continue
+        try:
+            band_val = float(band_row[label])
+        except Exception:
+            continue
+        if not np.isfinite(band_val):
+            continue
+        dist = abs(value - band_val)
+        if best is None or dist < best:
+            best = dist
+            best_idx = idx
+    return best_idx
+
+
 def _transform_slope(raw: float, mode: str, value_per_point: float, scale: float) -> float:
     """Convert a raw price-per-bar slope to scaled or angle form."""
     if mode == "raw":
@@ -977,12 +1026,7 @@ class SdBands(Indicator):
             mean = self._sums[asset] / n
             var = max(self._sum_sqs[asset] / n - mean ** 2, 0.0)
             s = float(np.sqrt(var))
-            band_s = pd.Series({
-                "mean": mean,
-                "+1sd": mean + s,   "-1sd": mean - s,
-                "+2sd": mean + 2*s, "-2sd": mean - 2*s,
-                "+3sd": mean + 3*s, "-3sd": mean - 3*s,
-            })
+            band_s = build_band_row(mean, s)
             self._history.setdefault(asset, []).append((ts, band_s))
             self._ts_lists.setdefault(asset, []).append(ts)
 
@@ -1026,6 +1070,31 @@ class SdBands(Indicator):
             return None
         rows = hist[lo:hi]
         return pd.DataFrame([r[1] for r in rows], index=[r[0] for r in rows])
+
+    def band_value_at(self, asset: str, ts, label: str) -> float | None:
+        """Return a single band value for `asset` at exact timestamp `ts`.
+
+        This avoids constructing a one-row DataFrame in hot paths.
+        """
+        import bisect
+
+        ts_list = self._ts_lists.get(asset)
+        hist = self._history.get(asset)
+        if not ts_list or not hist:
+            return None
+        idx = bisect.bisect_left(ts_list, ts)
+        if idx >= len(ts_list) or ts_list[idx] != ts:
+            return None
+        row = hist[idx][1]
+        try:
+            if label not in row.index:
+                return None
+            val = float(row[label])
+            if not np.isfinite(val):
+                return None
+            return val
+        except Exception:
+            return None
 
     @property
     def band_series(self) -> dict[str, pd.DataFrame]:
@@ -1091,12 +1160,7 @@ class VwapBands(Indicator):
             mean = self._sums[asset] / n
             var = max(self._sum_sqs[asset] / n - mean ** 2, 0.0)
             s = float(np.sqrt(var))
-            band_s = pd.Series({
-                "mean": mean,
-                "+1sd": mean + s,   "-1sd": mean - s,
-                "+2sd": mean + 2*s, "-2sd": mean - 2*s,
-                "+3sd": mean + 3*s, "-3sd": mean - 3*s,
-            })
+            band_s = build_band_row(mean, s)
             self._history.setdefault(asset, []).append((ts, band_s))
             self._ts_lists.setdefault(asset, []).append(ts)
 
@@ -1629,6 +1693,8 @@ class CumulativeYesNoDelta(Indicator):
         self._sums: dict[str, float] = {}
         self._sum_sqs: dict[str, float] = {}
         self._counts: dict[str, int] = {}
+        self._mean_history: dict[str, list[float]] = {}
+        self._std_history: dict[str, list[float]] = {}
         self._thr_history: dict[str, list[float]] = {}
         self._next_bar: int = -1
 
@@ -1660,6 +1726,8 @@ class CumulativeYesNoDelta(Indicator):
                 var = max(self._sum_sqs[asset] / n - mean * mean, 0.0)
                 s = float(np.sqrt(var))
                 thr = mean - 3.0 * s
+                self._mean_history.setdefault(asset, []).append(mean)
+                self._std_history.setdefault(asset, []).append(s)
                 self._thr_history.setdefault(asset, []).append(thr)
                 continue
 
@@ -1694,6 +1762,8 @@ class CumulativeYesNoDelta(Indicator):
             var = max(self._sum_sqs[asset] / n - mean * mean, 0.0)
             s = float(np.sqrt(var))
             thr = mean - 3.0 * s
+            self._mean_history.setdefault(asset, []).append(mean)
+            self._std_history.setdefault(asset, []).append(s)
             self._thr_history.setdefault(asset, []).append(thr)
 
     def compute(self, prices: pd.DataFrame, returns: pd.DataFrame, index: int) -> pd.Series:
@@ -1727,6 +1797,56 @@ class CumulativeYesNoDelta(Indicator):
         if not rows or not ts:
             return None
         return pd.Series(rows, index=ts, dtype=float)
+
+    def value_at(self, asset: str, index: int) -> float:
+        """Return baseline-shifted cumulative delta value at *index* for *asset*."""
+        rows = self._history.get(asset)
+        if not rows:
+            return float("nan")
+        if index < 0:
+            return float("nan")
+        idx = min(index, len(rows) - 1)
+        try:
+            val = float(rows[idx])
+        except Exception:
+            return float("nan")
+        baseline = self._baseline_map.get(asset)
+        if baseline is not None and np.isfinite(baseline):
+            val -= float(baseline)
+        return float(val) if np.isfinite(val) else float("nan")
+
+    def stats_at(self, asset: str, index: int) -> tuple[float, float]:
+        """Return running (mean, std) for shifted cumulative delta at *index*."""
+        means = self._mean_history.get(asset)
+        stds = self._std_history.get(asset)
+        if not means or not stds:
+            return float("nan"), float("nan")
+        if index < 0:
+            return float("nan"), float("nan")
+        idx = min(index, len(means) - 1)
+        try:
+            mean_val = float(means[idx])
+            std_val = float(stds[idx])
+        except Exception:
+            return float("nan"), float("nan")
+        if not np.isfinite(mean_val) or not np.isfinite(std_val):
+            return float("nan"), float("nan")
+        return mean_val, std_val
+
+    def band_position_at(self, asset: str, index: int, fallback_value: float = float("nan")) -> float:
+        """Return nearest SD-band index for shifted cumulative delta at *index*."""
+        cur_val = self.value_at(asset, index)
+        if not np.isfinite(cur_val):
+            cur_val = float(fallback_value)
+        if not np.isfinite(cur_val):
+            return float("nan")
+        mean_val, std_val = self.stats_at(asset, index)
+        if not np.isfinite(mean_val) or not np.isfinite(std_val):
+            return float("nan")
+        idx = nearest_band_index(build_band_row(mean_val, std_val), cur_val)
+        if idx is None:
+            return float("nan")
+        return float(idx)
 
 
 class CvdSdThreshold(Indicator):
@@ -1824,30 +1944,86 @@ class StopLossIndicator(Indicator):
         return pd.Series({a: float("nan") for a in prices.columns}, dtype=float)
 
     def _nearest_band_index(self, band_row: pd.Series, price: float) -> int | None:
-        # Map band labels to integer indexes: mean=0, +1sd=1, -1sd=-1, etc.
-        mapping = {
-            "mean": 0,
-            "+1sd": 1,
-            "+2sd": 2,
-            "+3sd": 3,
-            "-1sd": -1,
-            "-2sd": -2,
-            "-3sd": -3,
-        }
-        best = None
-        best_idx = None
-        for k, idx in mapping.items():
-            if k not in band_row.index:
-                continue
+        return nearest_band_index(band_row, float(price))
+
+    @staticmethod
+    def _label_for_band_index(idx: int) -> str:
+        if idx == 0:
+            return "mean"
+        if idx > 0:
+            return f"+{idx}sd"
+        return f"{idx}sd"
+
+    def target_band_index_for_entry(
+        self,
+        prices: pd.DataFrame,
+        entry_index: int,
+        asset: str,
+        entry_price: float,
+    ) -> int | None:
+        """Resolve the fixed target band-index for a position at entry time.
+
+        The returned index is an integer in [-3, 3] and remains constant for
+        the life of the position. A rolling band stop then evaluates this same
+        index on each new bar.
+        """
+        if self.mode != "band" or self._sd_bands is None:
+            return None
+        try:
+            ts = prices.index[entry_index]
+            bands = self._sd_bands.band_slice(asset, ts, ts)
+            if bands is None or bands.empty:
+                return None
+            row = bands.iloc[-1]
+            entry_band = self._nearest_band_index(row, float(entry_price))
+            if entry_band is None:
+                return None
+            if entry_band > 0:
+                target = entry_band - int(self.band_offset)
+            elif entry_band < 0:
+                target = entry_band + int(self.band_offset)
+            else:
+                target = entry_band + int(self.band_offset)
+            return int(max(-3, min(3, target)))
+        except Exception:
+            return None
+
+    def stop_price_for_band_target(
+        self,
+        prices: pd.DataFrame,
+        index: int,
+        asset: str,
+        target_band_index: int,
+        entry_price: float | None = None,
+        side: str = "short",
+    ) -> float:
+        """Compute stop at `index` by evaluating the target band on this bar."""
+        if self.mode != "band" or self._sd_bands is None:
+            return float("nan")
+        try:
+            ts = prices.index[index]
+            target = int(max(-3, min(3, int(target_band_index))))
+            label = self._label_for_band_index(target)
+            stop_val = self._sd_bands.band_value_at(asset, ts, label)
+            if stop_val is None:
+                return float("nan")
+
+            ep = None
             try:
-                v = float(band_row[k])
+                if entry_price is not None:
+                    ep = float(entry_price)
             except Exception:
-                continue
-            d = abs(price - v)
-            if best is None or d < best:
-                best = d
-                best_idx = idx
-        return best_idx
+                ep = None
+            if ep is not None and np.isfinite(ep):
+                if str(side).lower() == "long":
+                    if stop_val >= ep:
+                        stop_val = ep * 0.999999
+                else:
+                    if stop_val <= ep:
+                        stop_val = ep * 1.000001
+            return float(stop_val)
+        except Exception:
+            return float("nan")
 
     def stop_price_for_entry(
         self,
@@ -1855,6 +2031,7 @@ class StopLossIndicator(Indicator):
         entry_index: int,
         asset: str,
         entry_price: float,
+        side: str = "short",
     ) -> float:
         """Compute an absolute stop price for *asset* at the given entry bar.
 
@@ -1863,50 +2040,22 @@ class StopLossIndicator(Indicator):
         # Band-based stop
         if self.mode == "band" and self._sd_bands is not None:
             try:
-                ts = prices.index[entry_index]
-                bands = self._sd_bands.band_slice(asset, ts, ts)
-                if bands is None or bands.empty:
+                target = self.target_band_index_for_entry(
+                    prices=prices,
+                    entry_index=entry_index,
+                    asset=asset,
+                    entry_price=entry_price,
+                )
+                if target is None:
                     return float("nan")
-                row = bands.iloc[-1]
-                entry_band = self._nearest_band_index(row, float(entry_price))
-                if entry_band is None:
-                    return float("nan")
-                # Move the target band toward the mean relative to the entry band.
-                # If the entry is above the mean (positive index), subtract the
-                # offset so the stop lies closer to mean/VWAP. If entry is below
-                # the mean (negative index), add the offset. If exactly at the
-                # mean, default to moving outward by adding the offset.
-                if entry_band > 0:
-                    target = entry_band - int(self.band_offset)
-                elif entry_band < 0:
-                    target = entry_band + int(self.band_offset)
-                else:
-                    target = entry_band + int(self.band_offset)
-                # clamp target to [-3,3]
-                target = max(-3, min(3, target))
-                # map back to label
-                label = None
-                if target == 0:
-                    label = "mean"
-                elif target > 0:
-                    label = f"+{target}sd"
-                else:
-                    label = f"{target}sd"
-                if label not in row.index:
-                    return float("nan")
-                stop_val = float(row[label])
-                # Ensure stop is not on the wrong side of the entry price.
-                # For short positions a stop below the entry would immediately
-                # be true on the next tick; avoid that by enforcing a tiny
-                # buffer above the entry when the computed stop is <= entry.
-                try:
-                    ep = float(entry_price)
-                except Exception:
-                    ep = None
-                if ep is not None and np.isfinite(ep) and stop_val <= ep:
-                    # use multiplicative buffer so this also works for tiny prices
-                    stop_val = ep * 1.000001
-                return float(stop_val)
+                return self.stop_price_for_band_target(
+                    prices=prices,
+                    index=entry_index,
+                    asset=asset,
+                    target_band_index=target,
+                    entry_price=entry_price,
+                    side=side,
+                )
             except Exception:
                 return float("nan")
 
@@ -1923,8 +2072,13 @@ class StopLossIndicator(Indicator):
                     ep = float(entry_price)
                 except Exception:
                     ep = None
-                if ep is not None and np.isfinite(ep) and stop_val <= ep:
-                    stop_val = ep * 1.000001
+                if ep is not None and np.isfinite(ep):
+                    if str(side).lower() == "long":
+                        if stop_val >= ep:
+                            stop_val = ep * 0.999999
+                    else:
+                        if stop_val <= ep:
+                            stop_val = ep * 1.000001
                 return float(stop_val)
             except Exception:
                 return float("nan")
@@ -1935,13 +2089,19 @@ class StopLossIndicator(Indicator):
 class TakeProfitIndicator(Indicator):
     """Simple take-profit threshold indicator.
 
-    For the current task the TP is a small absolute price threshold near
-    zero. The indicator stores a `price_threshold` value and exposes it via
+    The TP is modeled as an absolute target price per side. The indicator
+    stores separate long/short target prices and exposes them via
     `threshold_for_entry` so strategies can record the TP price at entry.
     """
 
-    def __init__(self, price_threshold: float = 0.01, name: str = "take_profit") -> None:
-        self.price_threshold = float(price_threshold)
+    def __init__(
+        self,
+        price_short: float = 0.01,
+        price_long: float = 0.99,
+        name: str = "take_profit",
+    ) -> None:
+        self.price_short = float(price_short)
+        self.price_long = float(price_long)
         self._indicator_name = name
 
     @property
@@ -1949,12 +2109,21 @@ class TakeProfitIndicator(Indicator):
         return self._indicator_name
 
     def compute(self, prices: pd.DataFrame, returns: pd.DataFrame, index: int) -> pd.Series:
-        # Return the threshold value per asset for integration; strategies
-        # will typically read the threshold at entry and store it.
-        return pd.Series({a: float(self.price_threshold) for a in prices.columns}, dtype=float)
+        # Return short-side TP price for integration. Strategies should call
+        # threshold_for_entry with explicit side at entry time.
+        return pd.Series({a: float(self.price_short) for a in prices.columns}, dtype=float)
 
-    def threshold_for_entry(self, prices: pd.DataFrame, entry_index: int, asset: str, entry_price: float) -> float:
-        return float(self.price_threshold)
+    def threshold_for_entry(
+        self,
+        prices: pd.DataFrame,
+        entry_index: int,
+        asset: str,
+        entry_price: float,
+        side: str = "short",
+    ) -> float:
+        if str(side).lower() == "long":
+            return float(self.price_long)
+        return float(self.price_short)
 
 
 
