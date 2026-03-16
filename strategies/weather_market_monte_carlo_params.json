@@ -206,7 +206,10 @@
     {
       "name": "use_buy_cvd_3sd_gate",
       "type": "bool",
-      "values": [true, false]
+      "values": [true, false],
+      "enabled_if": {
+        "use_buy_cvd_filter": true
+      }
     },
     {
       "name": "max_buy_cvd_for_short",

@@ -5,7 +5,7 @@ optimizes on backtest metrics, and saves full trial history.
 
 Usage example:
     python strategies/run_weather_market_monte_carlo.py \
-        --event-slug highest-temperature-in-nyc-on-february-22-2026 \
+        --events-file strategies/weather_market_monte_carlo_events.json \
         --profile balanced \
         --n-trials 300 \
         --objective sharpe \
@@ -105,6 +105,55 @@ def _load_param_rules(config_path: Path) -> list[dict[str, Any]]:
             if "low" not in rule or "high" not in rule:
                 raise ValueError(f"Numeric rule {name!r} requires 'low' and 'high'")
     return rules
+
+
+def _load_event_slugs_from_file(events_file: Path) -> list[str]:
+    """Load event slugs from a JSON file.
+
+    Supported formats:
+    - ["slug-a", "slug-b"]
+    - {"event_slugs": ["slug-a", "slug-b"]}
+    - {"events": ["slug-a", {"slug": "slug-b"}, {"event_slug": "slug-c"}]}
+    """
+    try:
+        raw = json.loads(events_file.read_text())
+    except FileNotFoundError as exc:
+        raise ValueError(f"Events file not found: {events_file}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Events file is not valid JSON: {events_file} ({exc})") from exc
+
+    if isinstance(raw, list):
+        candidates = raw
+    elif isinstance(raw, dict):
+        if "event_slugs" in raw:
+            candidates = raw["event_slugs"]
+        elif "events" in raw:
+            candidates = raw["events"]
+        else:
+            raise ValueError(
+                f"Invalid events file {events_file}: expected top-level list, 'event_slugs', or 'events'"
+            )
+    else:
+        raise ValueError(f"Invalid events file {events_file}: expected JSON list or object")
+
+    if not isinstance(candidates, list):
+        raise ValueError(f"Invalid events file {events_file}: events payload must be a list")
+
+    slugs: list[str] = []
+    for idx, item in enumerate(candidates):
+        if isinstance(item, str):
+            slug = item.strip()
+        elif isinstance(item, dict):
+            raw_slug = item.get("event_slug", item.get("slug", ""))
+            slug = str(raw_slug).strip()
+        else:
+            raise ValueError(f"Invalid event entry at index {idx} in {events_file}: expected string or object")
+
+        if not slug:
+            raise ValueError(f"Invalid event entry at index {idx} in {events_file}: empty slug")
+        slugs.append(slug)
+
+    return slugs
 
 
 def _rule_enabled(rule: dict[str, Any], chosen: dict[str, Any], base_params: dict[str, object]) -> bool:
@@ -428,8 +477,17 @@ def main() -> None:
     parser.add_argument(
         "--event-slug",
         action="append",
-        required=True,
+        default=[],
         help="Event slug to include. Pass multiple times for multi-event optimization.",
+    )
+    parser.add_argument(
+        "--events-file",
+        type=str,
+        default=None,
+        help=(
+            "JSON file with events to include. Supports a top-level list, "
+            "or an object with 'event_slugs'/'events'."
+        ),
     )
     parser.add_argument(
         "--resample-minutes",
@@ -507,7 +565,23 @@ def main() -> None:
 
     resample_rule = f"{args.resample_minutes}min" if args.resample_minutes > 0 else None
 
-    event_slugs = list(dict.fromkeys(args.event_slug))
+    event_slugs_cli = [str(s).strip() for s in args.event_slug if str(s).strip()]
+    event_slugs_file: list[str] = []
+    events_file_path: Path | None = None
+    if args.events_file:
+        events_file_path = Path(args.events_file)
+        if not events_file_path.is_absolute():
+            events_file_path = PROJECT_ROOT / events_file_path
+        event_slugs_file = _load_event_slugs_from_file(events_file_path)
+        _vprint(
+            bool(args.verbose),
+            f"Loaded {len(event_slugs_file)} event slugs from '{events_file_path}'",
+        )
+
+    event_slugs = list(dict.fromkeys(event_slugs_file + event_slugs_cli))
+    if not event_slugs:
+        raise ValueError("Provide at least one event via --event-slug or --events-file")
+
     event_data: dict[str, EventBundle] = {}
     for idx, slug in enumerate(event_slugs, start=1):
         _vprint(
@@ -649,6 +723,7 @@ def main() -> None:
 
     best_payload = {
         "event_slugs": event_slugs,
+        "events_file": str(events_file_path) if events_file_path else None,
         "profile": args.profile,
         "param_config": str(param_config_path),
         "objective": args.objective,
