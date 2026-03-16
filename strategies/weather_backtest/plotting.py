@@ -8,6 +8,7 @@ import re
 from matplotlib.lines import Line2D
 
 from stratlab.strategy.indicators import (
+    SdBands,
     VwapSlope,
     VwapVolumeImbalance,
     MeanReversion,
@@ -687,14 +688,16 @@ def plot_entries_exits(
     if indicator_defs is None:
         _vwap = vwap if vwap is not None else pd.DataFrame()
         _vol = volume if volume is not None else pd.DataFrame()
+        _sd_bands = SdBands()
         indicator_defs = [
+            _sd_bands,
             VwapSlope(
                 vwap=_vwap, volume=_vol, lookback=vwap_slope_lookback,
                 mode=vwap_slope_mode, value_per_point=vwap_slope_value_per_point,
                 scale=vwap_slope_scale, name="vwap_slope",
             ),
             VwapVolumeImbalance(
-                vwap=_vwap, volume=_vol, lookback=vwap_slope_lookback,
+                volume=_vol, sd_bands=_sd_bands, lookback=vwap_slope_lookback,
                 name="vwap_volume_imbalance",
             ),
             MeanReversion(

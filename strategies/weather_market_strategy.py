@@ -76,6 +76,8 @@ class WeatherMarketImbalanceStrategy(Strategy):
         use_vwap_slope_filter: bool = True,
         use_vwap_volume_imbalance_filter: bool = True,
         max_vwap_volume_imbalance_pct: float = -1.0,
+        max_vwap_volume_imbalance_pct_for_short: float | None = None,
+        min_vwap_volume_imbalance_pct_for_long: float | None = None,
         vwap_volume_imbalance_lookback: int | None = None,
         vwap: pd.DataFrame | None = None,
         volume: pd.DataFrame | None = None,
@@ -88,13 +90,17 @@ class WeatherMarketImbalanceStrategy(Strategy):
         vwap_slope_scale: float = 1.0,
         vwap_slope_lookback: int = 15, # in bars, not hours; should be less than lookback if lookback_hours is set
         max_vwap_slope: float = -2.0,
+        max_vwap_slope_for_short: float | None = None,
+        min_vwap_slope_for_long: float | None = None,
         buy_volume: pd.DataFrame | None = None,
         sell_volume: pd.DataFrame | None = None,
         use_buy_cvd_filter: bool = True,
         max_buy_cvd_for_short: float = 0.0,
+        min_buy_cvd_for_long: float | None = None,
+        use_buy_cvd_3sd_gate: bool = False,
         use_sell_cvd_filter: bool = True,
         min_sell_cvd_for_short: float = 0.0,
-        use_cvd_sd_gate: bool = False,
+        max_sell_cvd_for_long: float | None = None,
         # stop-loss / take-profit controls
         use_stop_loss: bool = False,
         stop_loss_mode: str = "band",
@@ -131,27 +137,34 @@ class WeatherMarketImbalanceStrategy(Strategy):
             scaled/angle conversion, similar to Sierra Chart value-per-point.
         - vwap_slope_scale: Optional multiplier for scaled/angle output.
         - vwap_slope_lookback: Lookback for slope regression in BARS (not hours).
-        - max_vwap_slope: Entry requires slope <= this value.
+        - max_vwap_slope_for_short: Short-entry slope ceiling (entry requires slope <= this value).
             More negative -> stricter downward trend requirement.
+        - max_vwap_slope: Backward-compatible alias for short slope ceiling.
+        - min_vwap_slope_for_long: Long-entry slope floor (entry requires slope >= this value).
+            If None, falls back to short slope ceiling for backward compatibility.
         - use_vwap_volume_imbalance_filter: Enables VWAP volume-imbalance gate.
-        - max_vwap_volume_imbalance_pct: Entry requires imbalance <= this level.
-            Example: 50 means skip entries when above-VWAP volume dominates too much.
+        - max_vwap_volume_imbalance_pct_for_short: Short-entry imbalance ceiling.
+        - max_vwap_volume_imbalance_pct: Backward-compatible alias for short imbalance ceiling.
+        - min_vwap_volume_imbalance_pct_for_long: Long-entry imbalance floor.
+            If None, falls back to short imbalance ceiling for backward compatibility.
         - vwap_volume_imbalance_lookback: Lookback in UPDATE BARS for imbalance.
             If None, uses vwap_slope_lookback.
 
         Buy-volume delta filter:
         - buy_volume: optional DataFrame containing per-bar "yes" and "no"
             buy-volume columns (e.g. "market__yes"/"market__no").
-        - use_buy_cvd_filter / max_buy_cvd_for_long: optional negative-cumulative
-            buy CVD gate for shorts, requiring cumulative (yes - no) to be below
-            the configured threshold.
+        - use_buy_cvd_filter / max_buy_cvd_for_short: short gate, requiring
+            cumulative (yes - no) to be below threshold.
+        - min_buy_cvd_for_long: long gate, requiring cumulative (yes - no) to
+            be above threshold. If None, falls back to max_buy_cvd_for_short.
 
         Sell-volume delta filter:
         - sell_volume: optional DataFrame containing per-bar "yes" and "no"
             sell-volume columns (e.g. "market__yes"/"market__no").
-        - use_sell_cvd_filter / min_sell_cvd_for_short: optional positive-cumulative
-            sell CVD gate for shorts, requiring cumulative (yes - no) to be above
-            the configured threshold.
+        - use_sell_cvd_filter / min_sell_cvd_for_short: short gate, requiring
+            cumulative (yes - no) to be above threshold.
+        - max_sell_cvd_for_long: long gate, requiring cumulative (yes - no) to
+            be below threshold. If None, falls back to min_sell_cvd_for_short.
 
         Regime behavior (classification boundaries):
         - imbalance_above_mean_threshold / imbalance_above_1sd_threshold:
@@ -219,9 +232,19 @@ class WeatherMarketImbalanceStrategy(Strategy):
 
         self.use_buy_cvd_filter = bool(use_buy_cvd_filter)
         self.max_buy_cvd_for_short = float(max_buy_cvd_for_short)
+        self.min_buy_cvd_for_long = (
+            float(min_buy_cvd_for_long)
+            if min_buy_cvd_for_long is not None
+            else self.max_buy_cvd_for_short
+        )
         self.use_sell_cvd_filter = bool(use_sell_cvd_filter)
         self.min_sell_cvd_for_short = float(min_sell_cvd_for_short)
-        self.use_cvd_sd_gate = bool(use_cvd_sd_gate)
+        self.max_sell_cvd_for_long = (
+            float(max_sell_cvd_for_long)
+            if max_sell_cvd_for_long is not None
+            else self.min_sell_cvd_for_short
+        )
+        self.use_buy_cvd_3sd_gate = bool(use_buy_cvd_3sd_gate)
         self.use_stop_loss = bool(use_stop_loss)
         self.stop_loss_mode = str(stop_loss_mode)
         self.sl_entry_band_offset = int(sl_entry_band_offset)
@@ -249,7 +272,18 @@ class WeatherMarketImbalanceStrategy(Strategy):
 
         self.use_vwap_slope_filter = bool(use_vwap_slope_filter)
         self.use_vwap_volume_imbalance_filter = bool(use_vwap_volume_imbalance_filter)
-        self.max_vwap_volume_imbalance_pct = float(max_vwap_volume_imbalance_pct)
+        self.max_vwap_volume_imbalance_pct_for_short = (
+            float(max_vwap_volume_imbalance_pct_for_short)
+            if max_vwap_volume_imbalance_pct_for_short is not None
+            else float(max_vwap_volume_imbalance_pct)
+        )
+        # keep legacy attribute name for compatibility with existing callers
+        self.max_vwap_volume_imbalance_pct = self.max_vwap_volume_imbalance_pct_for_short
+        self.min_vwap_volume_imbalance_pct_for_long = (
+            float(min_vwap_volume_imbalance_pct_for_long)
+            if min_vwap_volume_imbalance_pct_for_long is not None
+            else self.max_vwap_volume_imbalance_pct_for_short
+        )
         self.vwap = vwap
         self.volume = volume
         self.vwap_slope_mode = str(vwap_slope_mode)
@@ -260,7 +294,18 @@ class WeatherMarketImbalanceStrategy(Strategy):
             self.vwap_volume_imbalance_lookback = int(vwap_slope_lookback)
         else:
             self.vwap_volume_imbalance_lookback = int(vwap_volume_imbalance_lookback)
-        self.max_vwap_slope = float(max_vwap_slope)
+        self.max_vwap_slope_for_short = (
+            float(max_vwap_slope_for_short)
+            if max_vwap_slope_for_short is not None
+            else float(max_vwap_slope)
+        )
+        # keep legacy attribute name for compatibility with existing callers
+        self.max_vwap_slope = self.max_vwap_slope_for_short
+        self.min_vwap_slope_for_long = (
+            float(min_vwap_slope_for_long)
+            if min_vwap_slope_for_long is not None
+            else self.max_vwap_slope_for_short
+        )
 
         _vwap = vwap if vwap is not None else pd.DataFrame()
         _volume = volume if volume is not None else pd.DataFrame()
@@ -287,12 +332,14 @@ class WeatherMarketImbalanceStrategy(Strategy):
             open_=_open,
         )
         needs_cvd = bool(
-            self.use_cvd_sd_gate
+            self.use_buy_cvd_3sd_gate
             or self.use_buy_cvd_filter
             or self.use_sell_cvd_filter
             or self.track_delta_history
         )
         needs_sd_bands = bool(self.use_market_regime or self.use_stop_loss or self.use_trailing_stop)
+        if self.use_vwap_volume_imbalance_filter:
+            needs_sd_bands = True
         needs_vwap = bool(
             self.use_vwap_slope_filter
             or self.use_vwap_volume_imbalance_filter
@@ -310,7 +357,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
             _cum_buy_delta = CumulativeYesNoDelta(volume_df=buy_volume, name="cum_buy_delta")
             _cum_sell_delta = CumulativeYesNoDelta(volume_df=sell_volume, name="cum_sell_delta")
             self.indicator_defs.extend([_cum_buy_delta, _cum_sell_delta])
-            if self.use_cvd_sd_gate and _cum_buy_delta is not None:
+            if self.use_buy_cvd_3sd_gate and _cum_buy_delta is not None:
                 self.indicator_defs.append(
                     CvdSdThreshold(cum_delta_indicator=_cum_buy_delta, name="_cvd_buy_sd_thr")
                 )
@@ -346,9 +393,8 @@ class WeatherMarketImbalanceStrategy(Strategy):
         if self.use_vwap_volume_imbalance_filter:
             self.indicator_defs.append(
                 VwapVolumeImbalance(
-                    vwap=_vwap,
                     volume=_volume,
-                    vwap_indicator=_vwap_indicator,
+                    sd_bands=_sd_bands,
                     lookback=self.vwap_volume_imbalance_lookback,
                 )
             )
@@ -868,68 +914,57 @@ class WeatherMarketImbalanceStrategy(Strategy):
             if self.use_vwap_slope_filter:
                 slope = float(self.indicators["vwap_slope"].get(asset, 0.0))
                 raw_slope = float(self.indicators["vwap_slope_raw"].get(asset, 0.0))
-                if slope > self.max_vwap_slope:
-                    continue
+                if entry_side == "short":
+                    if slope > self.max_vwap_slope_for_short:
+                        continue
+                else:
+                    if slope < self.min_vwap_slope_for_long:
+                        continue
 
             imbalance_pct = float("nan")
             if self.use_vwap_volume_imbalance_filter:
                 imbalance_pct = float(self.indicators["vwap_volume_imbalance"].get(asset, float("nan")))
-                if np.isnan(imbalance_pct) or imbalance_pct > self.max_vwap_volume_imbalance_pct:
+                if np.isnan(imbalance_pct):
                     continue
-
-            if self.use_cvd_sd_gate:
-                thr_series = getattr(self, "indicators", {}).get("_cvd_buy_sd_thr")
-                thr = float("nan")
-                if isinstance(thr_series, pd.Series):
-                    try:
-                        thr = float(thr_series.get(asset, float("nan")))
-                    except Exception:
-                        thr = float("nan")
-
-                if math.isfinite(thr):
-                    if entry_side == "short":
-                        if (not math.isfinite(buy_delta)) or buy_delta >= thr:
-                            logger.debug(
-                                "%s @ %s: buy CVD = %s must be < -3sd=%s – skipping",
-                                asset,
-                                current_ts,
-                                buy_delta,
-                                thr,
-                            )
-                            continue
-                    else:
-                        long_thr = abs(thr)
-                        if (not math.isfinite(buy_delta)) or buy_delta <= long_thr:
-                            logger.debug(
-                                "%s @ %s: buy CVD = %s must be > +3sd=%s – skipping",
-                                asset,
-                                current_ts,
-                                buy_delta,
-                                long_thr,
-                            )
-                            continue
+                if entry_side == "short":
+                    if imbalance_pct > self.max_vwap_volume_imbalance_pct_for_short:
+                        continue
                 else:
-                    if entry_side == "short":
-                        if (not math.isfinite(buy_delta)) or buy_delta >= self.max_buy_cvd_for_short:
-                            logger.debug(
-                                "%s @ %s: buy CVD = %s must be < max_buy_cvd_for_short=%s (no sd threshold) – skipping",
-                                asset,
-                                current_ts,
-                                buy_delta,
-                                self.max_buy_cvd_for_short,
-                            )
-                            continue
-                    else:
-                        if (not math.isfinite(buy_delta)) or buy_delta <= self.max_buy_cvd_for_short:
-                            logger.debug(
-                                "%s @ %s: buy CVD = %s must be > max_buy_cvd_for_short=%s (no sd threshold) – skipping",
-                                asset,
-                                current_ts,
-                                buy_delta,
-                                self.max_buy_cvd_for_short,
-                            )
-                            continue
-            
+                    if imbalance_pct < self.min_vwap_volume_imbalance_pct_for_long:
+                        continue
+
+            if self.use_buy_cvd_3sd_gate:
+                buy_band_idx = self._cvd_band_position(
+                    indicator=getattr(self, "_cum_buy_delta_indicator", None),
+                    asset=asset,
+                    index=index,
+                    fallback_value=buy_delta,
+                )
+
+                # current default setting
+                short_cvd_band_gate = -3.0
+                long_cvd_band_gate = 3.0
+
+                if entry_side == "short":
+                    if (not math.isfinite(buy_band_idx)) or buy_band_idx > short_cvd_band_gate:
+                        logger.debug(
+                            "%s @ %s: buy CVD band idx = %s must be <= %s – skipping",
+                            asset,
+                            current_ts,
+                            buy_band_idx,
+                            short_cvd_band_gate,
+                        )
+                        continue
+                else:
+                    if (not math.isfinite(buy_band_idx)) or buy_band_idx < long_cvd_band_gate:
+                        logger.debug(
+                            "%s @ %s: buy CVD band idx = %s must be >= %s – skipping",
+                            asset,
+                            current_ts,
+                            buy_band_idx,
+                            long_cvd_band_gate,
+                        )
+                        continue
             if self.use_buy_cvd_filter:
                 if entry_side == "short":
                     if (not math.isfinite(buy_delta)) or buy_delta >= self.max_buy_cvd_for_short:
@@ -942,13 +977,13 @@ class WeatherMarketImbalanceStrategy(Strategy):
                         )
                         continue
                 else:
-                    if (not math.isfinite(buy_delta)) or buy_delta <= self.max_buy_cvd_for_short:
+                    if (not math.isfinite(buy_delta)) or buy_delta <= self.min_buy_cvd_for_long:
                         logger.debug(
-                            "%s @ %s: buy CVD = %s must be > max_buy_cvd_for_short=%s – skipping",
+                            "%s @ %s: buy CVD = %s must be > min_buy_cvd_for_long=%s – skipping",
                             asset,
                             current_ts,
                             buy_delta,
-                            self.max_buy_cvd_for_short,
+                            self.min_buy_cvd_for_long,
                         )
                         continue
 
@@ -964,13 +999,13 @@ class WeatherMarketImbalanceStrategy(Strategy):
                         )
                         continue
                 else:
-                    if (not math.isfinite(sell_delta)) or sell_delta >= self.min_sell_cvd_for_short:
+                    if (not math.isfinite(sell_delta)) or sell_delta >= self.max_sell_cvd_for_long:
                         logger.debug(
-                            "%s @ %s: sell CVD = %s must be < min_sell_cvd_for_short=%s – skipping",
+                            "%s @ %s: sell CVD = %s must be < max_sell_cvd_for_long=%s – skipping",
                             asset,
                             current_ts,
                             sell_delta,
-                            self.min_sell_cvd_for_short,
+                            self.max_sell_cvd_for_long,
                         )
                         continue
 

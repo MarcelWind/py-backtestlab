@@ -7,9 +7,11 @@ call, populating `strategy.indicators` with the results keyed by indicator name.
 Example
 -------
 class MyStrategy(Strategy):
+    _sd = SdBands()
     indicator_defs = [
+        _sd,
         VwapSlope(vwap=vwap_df, volume=vol_df, lookback=30),
-        VwapVolumeImbalance(vwap=vwap_df, volume=vol_df, lookback=60),
+        VwapVolumeImbalance(volume=vol_df, sd_bands=_sd, lookback=60),
         BandPosition(lookback_hours=6.0),
     ]
 
@@ -604,37 +606,35 @@ class VwapSlope(Indicator):
 # ---------------------------------------------------------------------------
 
 class VwapVolumeImbalance(Indicator):
-    """Rolling (above-VWAP volume − below-VWAP volume) / total × 100.
+    """Rolling (above-mean volume − below/equal-mean volume) / total × 100.
 
     Returns a ``pd.Series`` indexed by asset name. Assets with insufficient
     data receive ``float("nan")``.
 
     Parameters
     ----------
-    vwap:
-        VWAP DataFrame aligned to prices (same index/columns).  Ignored when
-        *vwap_indicator* is provided.
     volume:
         Volume DataFrame aligned to prices.
+    sd_bands:
+        ``SdBands`` indicator instance used as the baseline source. The
+        indicator compares price against the expanding ``mean`` band at each
+        bar in the lookback window.
     lookback:
         Rolling window size in bars for the volume sums.
-    vwap_indicator:
-        ``Vwap`` indicator instance.  When set, VWAP values are sourced from
-        this indicator's accumulated history (takes precedence over *vwap*).
     """
 
     def __init__(
         self,
-        vwap: pd.DataFrame | None = None,
         volume: pd.DataFrame = pd.DataFrame(),
+        sd_bands: "SdBands | None" = None,
         lookback: int = 30,
         name: str = "vwap_volume_imbalance",
         plot_panel: int | None = 1,
-        vwap_indicator: "Vwap | None" = None,
     ) -> None:
-        self._vwap = vwap if vwap is not None else pd.DataFrame()
+        if sd_bands is None:
+            raise ValueError("VwapVolumeImbalance requires sd_bands")
         self._volume = volume
-        self.vwap_indicator = vwap_indicator
+        self.sd_bands = sd_bands
         self.lookback = int(lookback)
         self._indicator_name = name
         self._plot_panel = plot_panel
@@ -650,21 +650,16 @@ class VwapVolumeImbalance(Indicator):
         price_hist = prices.iloc[: index + 1][asset]
         vol_hist = self._volume.iloc[: index + 1][asset].fillna(0.0)
 
-        if self.vwap_indicator is not None:
-            from_ts = prices.index[0]
-            to_ts   = prices.index[index]
-            vwap_ser = self.vwap_indicator.vwap_slice(asset, from_ts, to_ts)
-            if vwap_ser is None:
-                return float("nan")
-            vwap_hist = vwap_ser.reindex(price_hist.index)
-        else:
-            if asset not in self._vwap.columns:
-                return float("nan")
-            vwap_hist = self._vwap.iloc[: index + 1][asset]
+        from_ts = prices.index[0]
+        to_ts = prices.index[index]
+        bands = self.sd_bands.band_slice(asset, from_ts, to_ts)
+        if bands is None or "mean" not in bands.columns:
+            return float("nan")
+        mean_hist = pd.to_numeric(bands["mean"], errors="coerce").reindex(price_hist.index)
 
-        valid = vwap_hist.notna() & (vol_hist > 0.0)
-        vol_above = vol_hist.where(valid & (price_hist > vwap_hist), 0.0)
-        vol_below = vol_hist.where(valid & (price_hist < vwap_hist), 0.0)
+        valid = mean_hist.notna() & (vol_hist > 0.0)
+        vol_above = vol_hist.where(valid & (price_hist > mean_hist), 0.0)
+        vol_below = vol_hist.where(valid & (price_hist <= mean_hist), 0.0)
 
         roll_window = max(3, self.lookback)
         ra = vol_above.rolling(window=roll_window, min_periods=1).sum()

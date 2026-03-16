@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from stratlab.strategy.indicators import SdBands, _compute_price
+from stratlab.strategy.indicators import SdBands, VwapVolumeImbalance, _compute_price
 
 
 def test_sdbands_compute():
@@ -92,8 +92,32 @@ def test_compute_price():
     print("✓ _compute_price test passed!")
 
 
+def test_vwap_volume_imbalance_uses_sdbands_mean():
+    """VwapVolumeImbalance should classify bars against expanding mean from SdBands."""
+    dates = pd.date_range("2024-01-01", periods=3, freq="h")
+    prices = pd.DataFrame({"A": [10.0, 20.0, 30.0]}, index=dates)
+    volume = pd.DataFrame({"A": [1.0, 1.0, 1.0]}, index=dates)
+    returns = prices.pct_change()
+
+    sdbands = SdBands(pricing_method="close")
+    for i in range(len(prices)):
+        sdbands.compute(prices, returns, i)
+
+    imbalance = VwapVolumeImbalance(volume=volume, sd_bands=sdbands, lookback=3)
+    out = imbalance.compute(prices, returns, index=2)
+    got = float(out["A"])
+
+    # Expanding means are [10, 15, 20] so bars are [<=mean, >mean, >mean].
+    # Ratio = (2 - 1) / (2 + 1) * 100 = 33.333...
+    assert np.isfinite(got), "Expected finite imbalance value"
+    assert abs(got - (100.0 / 3.0)) < 1e-6, f"Expected 33.333..., got {got}"
+
+    print("✓ VwapVolumeImbalance mean-baseline test passed!")
+
+
 if __name__ == "__main__":
     print("Testing SdBands fix...")
     test_compute_price()
     test_sdbands_compute()
+    test_vwap_volume_imbalance_uses_sdbands_mean()
     print("\n✅ All tests passed!")
