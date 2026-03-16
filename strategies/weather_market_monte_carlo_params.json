@@ -30,7 +30,7 @@
       "type": "int",
       "low": 5,
       "high": 5,
-      "step": 1,
+      "step": 0,
       "enabled_if": {
         "use_market_regime": true
       }
@@ -40,9 +40,20 @@
       "type": "float",
       "low": 0.5,
       "high": 0.5,
-      "step": 0.01,
+      "step": 0.0,
         "enabled_if": {
             "use_market_regime": true
+        }
+    },
+    {
+      "name": "imbalance_above_1sd_threshold",
+      "type": "float",
+      "low": 30.0,
+      "high": 50.0,
+      "step": 10.0,
+        "enabled_if": {
+            "use_market_regime": true,
+            "allow_longs": true
         }
     },
     {
@@ -52,7 +63,19 @@
       "high": 50.0,
       "step": 10.0,
         "enabled_if": {
-            "use_market_regime": true
+            "use_market_regime": true,
+            "allow_shorts": true
+        }
+    },
+    {
+      "name": "imbalance_up_below_mean_cap",
+      "type": "float",
+      "low": 10.0,
+      "high": 30.0,
+      "step": 10.0,
+        "enabled_if": {
+            "use_market_regime": true,
+            "allow_longs": true
         }
     },
     {
@@ -62,7 +85,8 @@
       "high": 30.0,
       "step": 10.0,
         "enabled_if": {
-            "use_market_regime": true
+            "use_market_regime": true,
+            "allow_shorts": true
         }
     },
     {
@@ -81,6 +105,11 @@
       "values": [true, false]
     },
     {
+      "name": "vwap_slope_mode",
+      "type": "bool",
+      "values": ["scaled"]
+    },
+    {
       "name": "vwap_slope_lookback",
       "type": "int",
       "low": 30,
@@ -91,21 +120,33 @@
       }
     },
     {
-      "name": "max_vwap_slope",
+      "name": "max_vwap_slope_for_short",
       "type": "float",
       "low": -1.0,
       "high": -1.0,
-      "step": 0.01,
+      "step": 0.0,
       "enabled_if": {
-        "use_vwap_slope_filter": true
+        "use_vwap_slope_filter": true,
+        "allow_shorts": true
+      }
+    },
+    {
+      "name": "min_vwap_slope_for_long",
+      "type": "float",
+      "low": 1.0,
+      "high": 1.0,
+      "step": 0.0,
+      "enabled_if": {
+        "use_vwap_slope_filter": true,
+        "allow_longs": true
       }
     },
     {
       "name": "vwap_slope_value_per_point",
       "type": "log_float",
       "low": 1e-6,
-      "high": 1e-1,
-      "step": 0,
+      "high": 1e-6,
+      "step": 0.0,
       "enabled_if": {
         "use_vwap_slope_filter": true
       }
@@ -115,7 +156,7 @@
       "type": "float",
       "low": 1.0,
       "high": 1.0,
-      "step": 0.1,
+      "step": 0.0,
       "enabled_if": {
         "use_vwap_slope_filter": true
       }
@@ -136,13 +177,25 @@
       }
     },
     {
-      "name": "max_vwap_volume_imbalance_pct",
+      "name": "max_vwap_volume_imbalance_pct_for_short",
       "type": "float",
       "low": -1.0,
       "high": -1.0,
-      "step": 0.1,
+      "step": 0.0,
       "enabled_if": {
-        "use_vwap_volume_imbalance_filter": true
+        "use_vwap_volume_imbalance_filter": true,
+        "allow_shorts": true
+      }
+    },
+    {
+      "name": "min_vwap_volume_imbalance_pct_for_long",
+      "type": "float",
+      "low": 1.0,
+      "high": 1.0,
+      "step": 0.0,
+      "enabled_if": {
+        "use_vwap_volume_imbalance_filter": true,
+        "allow_longs": true
       }
     },
     {
@@ -151,13 +204,30 @@
       "values": [true, false]
     },
     {
+      "name": "use_buy_cvd_3sd_gate",
+      "type": "bool",
+      "values": [true, false]
+    },
+    {
       "name": "max_buy_cvd_for_short",
       "type": "float",
-      "low": -2000.0,
-      "high": 0.0,
-      "step": 500.0,
+      "low": -1000.0,
+      "high": -1000.0,
+      "step": 0.0,
       "enabled_if": {
-        "use_buy_cvd_filter": true
+        "use_buy_cvd_filter": true,
+        "allow_shorts": true
+      }
+    },
+    {
+      "name": "min_buy_cvd_for_long",
+      "type": "float",
+      "low": 1000.0,
+      "high": 1000.0,
+      "step": 0.0,
+      "enabled_if": {
+        "use_buy_cvd_filter": true,
+        "allow_longs": true
       }
     },
     {
@@ -168,17 +238,29 @@
     {
       "name": "min_sell_cvd_for_short",
       "type": "float",
-      "low": 0.0,
+      "low": 1000.0,
       "high": 1000.0,
-      "step": 500.0,
+      "step": 0.0,
       "enabled_if": {
-        "use_sell_cvd_filter": true
+        "use_sell_cvd_filter": true,
+        "allow_shorts": true
       }
     },
     {
-      "name": "use_cvd_sd_gate",
+      "name": "max_sell_cvd_for_long",
+      "type": "float",
+      "low": 1000.0,
+      "high": 1000.0,
+      "step": 0.0,
+      "enabled_if": {
+        "use_sell_cvd_filter": true,
+        "allow_longs": true
+      }
+    },
+    {
+      "name": "max_concurrent_positions",
       "type": "bool",
-      "values": [true, false]
+      "values": [null]
     },
     {
       "name": "use_stop_loss",
@@ -186,13 +268,22 @@
       "values": [true, false]
     },
     {
+      "name": "stop_loss_mode",
+      "type": "bool",
+      "values": ["band"],
+      "enabled_if": {
+        "use_stop_loss": true
+      }
+    },
+    {
       "name": "sl_entry_band_offset",
       "type": "int",
-      "low": 1,
+      "low": 2,
       "high": 4,
       "step": 1,
       "enabled_if": {
-        "use_stop_loss": true
+        "use_stop_loss": true,
+        "stop_loss_mode": "band"
       }
     },
     {
@@ -205,7 +296,7 @@
       "type": "float",
       "low": 0.01,
       "high": 0.01,
-      "step": 0.001,
+      "step": 0.0,
       "enabled_if": {
         "use_take_profit": true
       }
@@ -215,7 +306,7 @@
       "type": "float",
       "low": 0.99,
       "high": 0.99,
-      "step": 0.001,
+      "step": 0.0,
       "enabled_if": {
         "use_take_profit": true
       }
