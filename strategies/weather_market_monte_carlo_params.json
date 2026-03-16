@@ -106,7 +106,7 @@
     },
     {
       "name": "vwap_slope_mode",
-      "type": "bool",
+      "type": "choice",
       "values": ["scaled"]
     },
     {
@@ -262,7 +262,7 @@
     },
     {
       "name": "max_concurrent_positions",
-      "type": "bool",
+      "type": "choice",
       "values": [null]
     },
     {
@@ -272,7 +272,7 @@
     },
     {
       "name": "stop_loss_mode",
-      "type": "bool",
+      "type": "choice",
       "values": ["band"],
       "enabled_if": {
         "use_stop_loss": true

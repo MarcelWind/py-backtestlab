@@ -6,6 +6,7 @@ optimizes on backtest metrics, and saves full trial history.
 Usage example:
     python strategies/run_weather_market_monte_carlo.py \
         --events-file strategies/weather_market_monte_carlo_events.json \
+        --param-config strategies/weather_market_monte_carlo_params.json \
         --profile balanced \
         --n-trials 300 \
         --objective sharpe \
@@ -77,9 +78,37 @@ def _metric_direction(metric: str) -> float:
     return -1.0 if metric in lower_is_better else 1.0
 
 
+def _json_error_context(text: str, lineno: int, radius: int = 2) -> str:
+    """Build a compact line-context snippet for JSON decode errors."""
+    lines = text.splitlines()
+    if not lines:
+        return ""
+    idx = max(0, lineno - 1)
+    start = max(0, idx - radius)
+    end = min(len(lines), idx + radius + 1)
+    snippet = []
+    for i in range(start, end):
+        prefix = ">" if i == idx else " "
+        snippet.append(f"{prefix} {i + 1:4d}: {lines[i]}")
+    return "\n".join(snippet)
+
+
 def _load_param_rules(config_path: Path) -> list[dict[str, Any]]:
     """Load Monte Carlo parameter rules from JSON file."""
-    raw = json.loads(config_path.read_text())
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ValueError(f"Parameter config file not found: {config_path}") from exc
+
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        context = _json_error_context(text, exc.lineno)
+        raise ValueError(
+            f"Parameter config is not valid JSON: {config_path} "
+            f"(line {exc.lineno}, column {exc.colno}): {exc.msg}\n{context}"
+        ) from exc
+
     rules = raw.get("parameters", [])
     if not isinstance(rules, list) or not rules:
         raise ValueError(f"Invalid parameter config at {config_path}: expected non-empty 'parameters' list")
@@ -95,12 +124,14 @@ def _load_param_rules(config_path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"Duplicate parameter rule for {name!r}")
         seen.add(name)
         rule_type = str(rule.get("type", "")).strip()
-        if rule_type not in {"bool", "int", "float", "log_float"}:
+        if rule_type not in {"bool", "choice", "int", "float", "log_float"}:
             raise ValueError(f"Unsupported rule type {rule_type!r} for parameter {name!r}")
-        if rule_type == "bool":
+        if rule_type in {"bool", "choice"}:
             values = rule.get("values")
             if not isinstance(values, list) or not values:
-                raise ValueError(f"Boolean rule {name!r} requires non-empty 'values'")
+                raise ValueError(f"Rule {name!r} of type {rule_type!r} requires non-empty 'values'")
+            if rule_type == "bool" and not all(isinstance(v, bool) for v in values):
+                raise ValueError(f"Boolean rule {name!r} must contain only true/false values")
         else:
             if "low" not in rule or "high" not in rule:
                 raise ValueError(f"Numeric rule {name!r} requires 'low' and 'high'")
@@ -193,7 +224,7 @@ def _sample_trial_params(
             continue
 
         rtype = str(rule["type"])
-        if rtype == "bool":
+        if rtype in {"bool", "choice"}:
             values = rule.get("values", [True, False])
             sampled[name] = values[int(rng.integers(0, len(values)))]
             continue
@@ -210,17 +241,17 @@ def _sample_trial_params(
 
 def _estimate_max_unique_trials(rules: list[dict[str, Any]], base_params: dict[str, object]) -> int | None:
     """Estimate unique parameter combinations implied by rule steps and booleans."""
-    bool_rules = [r for r in rules if str(r.get("type")) == "bool"]
-    num_rules = [r for r in rules if str(r.get("type")) != "bool"]
+    discrete_rules = [r for r in rules if str(r.get("type")) in {"bool", "choice"}]
+    num_rules = [r for r in rules if str(r.get("type")) not in {"bool", "choice"}]
 
-    # Build all boolean assignments.
-    bool_value_lists: list[list[Any]] = [list(r.get("values", [True, False])) for r in bool_rules]
+    # Build all discrete assignments.
+    discrete_value_lists: list[list[Any]] = [list(r.get("values", [True, False])) for r in discrete_rules]
     total = 0
-    for combo in itertools.product(*bool_value_lists) if bool_value_lists else [()]:
-        chosen_bool = {str(r["name"]): combo[i] for i, r in enumerate(bool_rules)}
+    for combo in itertools.product(*discrete_value_lists) if discrete_value_lists else [()]:
+        chosen_discrete = {str(r["name"]): combo[i] for i, r in enumerate(discrete_rules)}
         branch_product = 1
         for rule in num_rules:
-            if not _rule_enabled(rule, chosen_bool, base_params):
+            if not _rule_enabled(rule, chosen_discrete, base_params):
                 continue
             low = float(rule["low"])
             high = float(rule["high"])
