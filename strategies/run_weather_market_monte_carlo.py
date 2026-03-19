@@ -22,6 +22,7 @@ import itertools
 import math
 import csv
 import sys
+import time
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
@@ -76,6 +77,14 @@ def _metric_direction(metric: str) -> float:
     """Return +1 when higher-is-better, -1 when lower-is-better."""
     lower_is_better = {"max_drawdown", "volatility"}
     return -1.0 if metric in lower_is_better else 1.0
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Format elapsed seconds as HH:MM:SS."""
+    total_seconds = max(0, int(round(seconds)))
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def _json_error_context(text: str, lineno: int, radius: int = 2) -> str:
@@ -604,6 +613,7 @@ def main() -> None:
             f"(profile={args.profile}, objective={args.objective}, requested_trials={args.n_trials})"
         ),
     )
+    run_start = time.perf_counter()
 
     resample_rule = f"{args.resample_minutes}min" if args.resample_minutes > 0 else None
 
@@ -812,6 +822,8 @@ def main() -> None:
     }
     summary_path.write_text(json.dumps(summary_payload, indent=2, sort_keys=True))
 
+    elapsed_seconds = time.perf_counter() - run_start
+
     print(f"Events: {event_slugs}")
     print(f"Profile: {args.profile}")
     print(f"Objective: {args.objective}")
@@ -824,6 +836,7 @@ def main() -> None:
         print("Skipped final best-params rerun (faster completion; no regenerated best trades).")
     print(f"Best score: {best_score:.6f}")
     print(f"Best params: {best_params}")
+    print(f"Total runtime: {_format_elapsed(elapsed_seconds)}")
     print(f"Saved: {trials_path}")
     print(f"Saved: {top_path}")
     print(f"Saved: {best_params_path}")
