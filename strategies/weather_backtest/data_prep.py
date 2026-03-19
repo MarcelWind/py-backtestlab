@@ -275,6 +275,49 @@ def _build_matrices(
     return closes, vwaps, volumes, buy_volumes, sell_volumes, highs, lows, opens
 
 
+def _build_buy_sell_matrices(
+    df: pd.DataFrame,
+    *,
+    resample_rule: str | None = None,
+    align_index: pd.Index | None = None,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """Build buy/sell volume matrices keyed by market__outcome when available.
+
+    Unlike price pivots, this path intentionally keeps both yes/no outcomes so
+    CVD filters can resolve paired columns.
+    """
+    if "buy_volume" not in df.columns or "sell_volume" not in df.columns:
+        return None, None
+
+    df_bv = df.copy()
+    if "outcome" in df_bv.columns:
+        mask = df_bv["outcome"].astype(str).str.strip().str.lower().isin(["yes", "no"])
+        df_bv.loc[mask, "_market_key"] = (
+            df_bv.loc[mask, "market"].astype(str)
+            + "__"
+            + df_bv.loc[mask, "outcome"].astype(str).str.strip().str.lower()
+        )
+        df_bv.loc[~mask, "_market_key"] = df_bv.loc[~mask, "market"].astype(str)
+    else:
+        df_bv["_market_key"] = df_bv["market"].astype(str)
+
+    buy_volumes = df_bv.pivot_table(index="_ts", columns="_market_key", values="buy_volume", aggfunc="sum")
+    sell_volumes = df_bv.pivot_table(index="_ts", columns="_market_key", values="sell_volume", aggfunc="sum")
+
+    buy_volumes = buy_volumes.sort_index()
+    sell_volumes = sell_volumes.sort_index()
+
+    if resample_rule:
+        buy_volumes = buy_volumes.resample(resample_rule).sum().fillna(0.0)
+        sell_volumes = sell_volumes.resample(resample_rule).sum().fillna(0.0)
+
+    if align_index is not None:
+        buy_volumes = buy_volumes.reindex(align_index).fillna(0.0)
+        sell_volumes = sell_volumes.reindex(align_index).fillna(0.0)
+
+    return buy_volumes, sell_volumes
+
+
 def load_event_ohlcv(event_slug: str, prefer_outcome: str | None = "yes") -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None]:
     """Load one Polymarket event and build close/vwap/volume/OHLC matrices.
 
@@ -304,3 +347,31 @@ def load_event_ohlcv_resampled(
     """
     df = _load_event_rows(event_slug, prefer_outcome=prefer_outcome)
     return _build_matrices(df, resample_rule=resample_rule)
+
+
+def load_event_ohlcv_resampled_with_unfiltered_cvd(
+    event_slug: str,
+    resample_rule: str | None = None,
+    prefer_outcome: str | None = "yes",
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None, pd.DataFrame | None]:
+    """Load event data once; keep prices filtered but CVD buy/sell unfiltered.
+
+    Price-side matrices (close/vwap/volume/OHLC) respect prefer_outcome,
+    while buy/sell volume matrices always preserve yes/no columns for CVD.
+    """
+    raw_df = _load_event_rows(event_slug, prefer_outcome=None)
+
+    price_df = raw_df
+    if prefer_outcome:
+        price_df = pick_plot_frame(raw_df, prefer_outcome=prefer_outcome)
+
+    closes, vwaps, volumes, _, _, highs, lows, opens = _build_matrices(
+        price_df,
+        resample_rule=resample_rule,
+    )
+    buy_volumes, sell_volumes = _build_buy_sell_matrices(
+        raw_df,
+        resample_rule=resample_rule,
+        align_index=closes.index,
+    )
+    return closes, vwaps, volumes, buy_volumes, sell_volumes, highs, lows, opens

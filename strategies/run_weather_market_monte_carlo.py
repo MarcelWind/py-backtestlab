@@ -36,7 +36,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from stratlab.backtest.backtester import Backtester
 from stratlab.config import RESULTS_DIR
 from stratlab.optimize.search import ParamSpec, ParamType
-from strategies.weather_backtest import load_event_ohlcv_resampled
+from strategies.weather_backtest import load_event_ohlcv_resampled_with_unfiltered_cvd
 from strategies.weather_market_strategy import WeatherMarketImbalanceStrategy
 
 _PARAM_CONFIG_PATH = Path(__file__).with_name("weather_market_monte_carlo_params.json")
@@ -462,7 +462,7 @@ def _load_event_bundle(
     resample_rule: str | None,
     prefer_outcome: str,
 ) -> EventBundle:
-    prices, vwap, volume, buy_volume_full, sell_volume_full, high, low, open_ = load_event_ohlcv_resampled(
+    prices, vwap, volume, buy_volume_full, sell_volume_full, high, low, open_ = load_event_ohlcv_resampled_with_unfiltered_cvd(
         event_slug,
         resample_rule=resample_rule,
         prefer_outcome=prefer_outcome,
@@ -530,7 +530,10 @@ def main() -> None:
         "--prefer-outcome",
         choices=["yes", "no"],
         default="yes",
-        help="Preferred outcome token for price matrix.",
+        help=(
+            "Preferred outcome token for price matrix. "
+            "CVD buy/sell volumes are always loaded unfiltered with yes/no pairs."
+        ),
     )
     parser.add_argument(
         "--objective",
@@ -561,6 +564,14 @@ def main() -> None:
         type=int,
         default=20,
         help="How many best trials to save as top_trials.csv.",
+    )
+    parser.add_argument(
+        "--best-rerun",
+        action="store_true",
+        help=(
+            "Re-run best params at the end to regenerate trades and full best metrics. "
+            "By default this rerun is skipped for faster completion."
+        ),
     )
     parser.add_argument(
         "--verbose",
@@ -706,43 +717,61 @@ def main() -> None:
     best_metrics_by_event: dict[str, dict[str, float]] = {}
     best_trades_rows = 0
     best_trades_header_written = False
-    for slug, bundle in event_data.items():
-        _vprint(bool(args.verbose), f"Re-running best parameters for '{slug}'")
-        best_strategy_kwargs = dict(base_params)
-        best_strategy_kwargs.update(best_params_no_rebalance)
-        best_strategy_kwargs["vwap"] = bundle["vwap"]
-        best_strategy_kwargs["volume"] = bundle["volume"]
-        best_strategy_kwargs["high"] = bundle["high"]
-        best_strategy_kwargs["low"] = bundle["low"]
-        best_strategy_kwargs["open_"] = bundle["open_"]
-        best_strategy_kwargs["buy_volume"] = bundle["buy_volume"]
-        best_strategy_kwargs["sell_volume"] = bundle["sell_volume"]
-
-        event_metrics, event_trades = _run_single_backtest(
-            prices=bundle["prices"],
-            strategy_kwargs=best_strategy_kwargs,
-            rebalance_freq=int(best_params.get("rebalance_freq", args.rebalance_freq)),
-            collect_trades=True,
-        )
-        best_metrics_by_event[slug] = event_metrics
-        if not event_trades.empty:
-            event_trades = event_trades.copy()
-            event_trades["event_slug"] = slug
-            event_trades.to_csv(
-                best_trades_path,
-                mode="a",
-                index=False,
-                header=(not best_trades_header_written),
-            )
-            best_trades_header_written = True
-            best_trades_rows += int(len(event_trades))
-        event_trades.to_csv(per_event_dir / f"{slug}.csv", index=False)
+    if not args.best_rerun:
+        # Recover objective-only per-event values from the top trial row.
+        best_trial_row: dict[str, Any] = {}
+        if not top_df.empty:
+            best_trial_row = cast(dict[str, Any], top_df.iloc[0].to_dict())
+        for slug in event_slugs:
+            key = f"m_{slug}_{args.objective}"
+            if key in best_trial_row and pd.notna(best_trial_row[key]):
+                best_metrics_by_event[slug] = {args.objective: float(best_trial_row[key])}
+        # Preserve output contract by creating empty trade files.
+        for slug in event_slugs:
+            pd.DataFrame().to_csv(per_event_dir / f"{slug}.csv", index=False)
+        pd.DataFrame().to_csv(best_trades_path, index=False)
         _vprint(
             bool(args.verbose),
-            f"Saved per-event best trades for '{slug}' ({len(event_trades)} rows)",
+            "Skipped final best-params rerun; wrote parameter outputs only.",
         )
+    else:
+        for slug, bundle in event_data.items():
+            _vprint(bool(args.verbose), f"Re-running best parameters for '{slug}'")
+            best_strategy_kwargs = dict(base_params)
+            best_strategy_kwargs.update(best_params_no_rebalance)
+            best_strategy_kwargs["vwap"] = bundle["vwap"]
+            best_strategy_kwargs["volume"] = bundle["volume"]
+            best_strategy_kwargs["high"] = bundle["high"]
+            best_strategy_kwargs["low"] = bundle["low"]
+            best_strategy_kwargs["open_"] = bundle["open_"]
+            best_strategy_kwargs["buy_volume"] = bundle["buy_volume"]
+            best_strategy_kwargs["sell_volume"] = bundle["sell_volume"]
 
-    if not best_trades_header_written:
+            event_metrics, event_trades = _run_single_backtest(
+                prices=bundle["prices"],
+                strategy_kwargs=best_strategy_kwargs,
+                rebalance_freq=int(best_params.get("rebalance_freq", args.rebalance_freq)),
+                collect_trades=True,
+            )
+            best_metrics_by_event[slug] = event_metrics
+            if not event_trades.empty:
+                event_trades = event_trades.copy()
+                event_trades["event_slug"] = slug
+                event_trades.to_csv(
+                    best_trades_path,
+                    mode="a",
+                    index=False,
+                    header=(not best_trades_header_written),
+                )
+                best_trades_header_written = True
+                best_trades_rows += int(len(event_trades))
+            event_trades.to_csv(per_event_dir / f"{slug}.csv", index=False)
+            _vprint(
+                bool(args.verbose),
+                f"Saved per-event best trades for '{slug}' ({len(event_trades)} rows)",
+            )
+
+    if not best_trades_header_written and args.best_rerun:
         pd.DataFrame().to_csv(best_trades_path, index=False)
 
     aggregate_best_metrics: dict[str, float] = {}
@@ -773,6 +802,8 @@ def main() -> None:
         "best_metrics_mean": aggregate_best_metrics,
         "best_metrics_by_event": best_metrics_by_event,
         "n_best_trades": int(best_trades_rows),
+        "best_rerun": bool(args.best_rerun),
+        "skip_best_rerun": bool(not args.best_rerun),
         "output_dir": str(out_dir),
         "trials_file": trials_path.name,
         "top_trials_file": top_path.name,
@@ -789,6 +820,8 @@ def main() -> None:
         print("Run interrupted by user. Partial results were saved.")
     if max_possible_trials is not None:
         print(f"Max unique trials from step grid: {max_possible_trials}")
+    if not args.best_rerun:
+        print("Skipped final best-params rerun (faster completion; no regenerated best trades).")
     print(f"Best score: {best_score:.6f}")
     print(f"Best params: {best_params}")
     print(f"Saved: {trials_path}")
