@@ -37,6 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from stratlab.backtest.backtester import Backtester
 from stratlab.config import RESULTS_DIR
 from stratlab.optimize.search import ParamSpec, ParamType
+from stratlab.validation.partition import EventPartition, split_events_in_sample_out_of_sample
 from strategies.weather_backtest import load_event_ohlcv_resampled_with_unfiltered_cvd
 from strategies.weather_market_strategy import WeatherMarketImbalanceStrategy
 
@@ -293,6 +294,8 @@ def _run_trials_with_interrupt_handling(
     rules: list[dict[str, Any]],
     base_params: dict[str, object],
     event_data: dict[str, EventBundle],
+    in_sample_event_slugs: set[str],
+    out_of_sample_event_slugs: set[str],
     rng: np.random.Generator,
     objective: str,
     rebalance_freq: int,
@@ -352,6 +355,8 @@ def _run_trials_with_interrupt_handling(
                 break
 
             per_event_scores: dict[str, float] = {}
+            per_event_scores_in_sample: dict[str, float] = {}
+            per_event_scores_out_of_sample: dict[str, float] = {}
             row: dict[str, Any] = dict(chosen_params)
 
             for slug, bundle in event_data.items():
@@ -378,15 +383,32 @@ def _run_trials_with_interrupt_handling(
                 raw_obj = float(metrics.get(objective, 0.0))
                 signed_obj = objective_sign * raw_obj
                 per_event_scores[slug] = signed_obj
+                if slug in in_sample_event_slugs:
+                    per_event_scores_in_sample[slug] = signed_obj
+                elif slug in out_of_sample_event_slugs:
+                    per_event_scores_out_of_sample[slug] = signed_obj
                 row[f"m_{slug}_{objective}"] = raw_obj
                 _vprint(
                     verbose,
                     f"[trial {trial_idx + 1}/{target_trials}] Event '{slug}' {objective}={raw_obj:.6f}",
                 )
 
-            agg_score = float(np.mean(list(per_event_scores.values()))) if per_event_scores else float("-inf")
+            agg_score = (
+                float(np.mean(list(per_event_scores_in_sample.values())))
+                if per_event_scores_in_sample
+                else float("-inf")
+            )
+            oos_score = (
+                float(np.mean(list(per_event_scores_out_of_sample.values())))
+                if per_event_scores_out_of_sample
+                else float("nan")
+            )
             row["_objective"] = agg_score
+            row["_objective_in_sample"] = agg_score
+            row["_objective_out_of_sample"] = oos_score
             row["_event_count"] = len(per_event_scores)
+            row["_event_count_in_sample"] = len(per_event_scores_in_sample)
+            row["_event_count_out_of_sample"] = len(per_event_scores_out_of_sample)
 
             # Stream each trial row to disk immediately to avoid holding the full
             # trial history in memory for large runs.
@@ -563,6 +585,23 @@ def main() -> None:
     parser.add_argument("--n-trials", type=int, default=200, help="Number of random trials.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument(
+        "--partition-seed",
+        type=int,
+        default=None,
+        help="Seed for deterministic IS/OOS event split. Defaults to --seed.",
+    )
+    parser.add_argument(
+        "--out-of-sample-ratio",
+        type=float,
+        default=0.4,
+        help="Fraction of loaded events assigned to out-of-sample validation.",
+    )
+    parser.add_argument(
+        "--disable-is-oos-split",
+        action="store_true",
+        help="Disable IS/OOS partitioning and optimize using all loaded events.",
+    )
+    parser.add_argument(
         "--rebalance-freq",
         type=int,
         default=1,
@@ -605,6 +644,8 @@ def main() -> None:
         raise ValueError("--n-trials must be > 0")
     if args.rebalance_freq <= 0:
         raise ValueError("--rebalance-freq must be > 0")
+    if not (0.0 < float(args.out_of_sample_ratio) < 1.0):
+        raise ValueError("--out-of-sample-ratio must be between 0 and 1")
 
     _vprint(
         bool(args.verbose),
@@ -634,12 +675,26 @@ def main() -> None:
     if not event_slugs:
         raise ValueError("Provide at least one event via --event-slug or --events-file")
 
+    partition_seed = int(args.seed if args.partition_seed is None else args.partition_seed)
+    partition: EventPartition | None = None
+    if args.disable_is_oos_split:
+        in_sample_event_slugs = list(event_slugs)
+        out_of_sample_event_slugs: list[str] = []
+    else:
+        partition = split_events_in_sample_out_of_sample(
+            event_slugs,
+            out_of_sample_ratio=float(args.out_of_sample_ratio),
+            seed=partition_seed,
+        )
+        in_sample_event_slugs = partition.in_sample_event_slugs
+        out_of_sample_event_slugs = partition.out_of_sample_event_slugs
+
     event_data: dict[str, EventBundle] = {}
     for idx, slug in enumerate(event_slugs, start=1):
-        _vprint(
-            bool(args.verbose),
-            f"[{idx}/{len(event_slugs)}] Loading event data for '{slug}' (resample={resample_rule or 'native'})",
-        )
+        # _vprint(
+        #     bool(args.verbose),
+        #     f"[{idx}/{len(event_slugs)}] Loading event data for '{slug}' (resample={resample_rule or 'native'})",
+        # )
         event_data[slug] = _load_event_bundle(
             event_slug=slug,
             resample_rule=resample_rule,
@@ -649,9 +704,19 @@ def main() -> None:
             bool(args.verbose),
             (
                 f"[{idx}/{len(event_slugs)}] Loaded '{slug}' "
-                f"with {len(event_data[slug]['prices'])} bars"
+                f"with {len(event_data[slug]['prices'])} bars "
+                f"(resample={resample_rule or 'native'})"
             ),
         )
+
+    _vprint(
+        bool(args.verbose),
+        (
+            "Event split prepared "
+            f"(in_sample={len(in_sample_event_slugs)}, out_of_sample={len(out_of_sample_event_slugs)}, "
+            f"partition_seed={partition_seed}, split_enabled={not args.disable_is_oos_split})"
+        ),
+    )
 
     base_params = WeatherMarketImbalanceStrategy.profile_params(args.profile)
     if args.allow_longs is not None:
@@ -702,6 +767,8 @@ def main() -> None:
             rules=rules,
             base_params=base_params,
             event_data=event_data,
+            in_sample_event_slugs=set(in_sample_event_slugs),
+            out_of_sample_event_slugs=set(out_of_sample_event_slugs),
             rng=rng,
             objective=args.objective,
             rebalance_freq=int(args.rebalance_freq),
@@ -785,14 +852,48 @@ def main() -> None:
         pd.DataFrame().to_csv(best_trades_path, index=False)
 
     aggregate_best_metrics: dict[str, float] = {}
+
+    def _aggregate_metrics_for_events(slugs: list[str]) -> dict[str, float]:
+        if not slugs:
+            return {}
+        metrics_subset = {slug: best_metrics_by_event[slug] for slug in slugs if slug in best_metrics_by_event}
+        if not metrics_subset:
+            return {}
+        metric_names = sorted(next(iter(metrics_subset.values())).keys())
+        out: dict[str, float] = {}
+        for metric_name in metric_names:
+            vals = [v.get(metric_name, 0.0) for v in metrics_subset.values()]
+            out[metric_name] = float(np.mean(vals))
+        return out
+
     if best_metrics_by_event:
         metric_names = sorted(next(iter(best_metrics_by_event.values())).keys())
         for metric_name in metric_names:
             vals = [v.get(metric_name, 0.0) for v in best_metrics_by_event.values()]
             aggregate_best_metrics[metric_name] = float(np.mean(vals))
 
+    aggregate_metrics_in_sample = _aggregate_metrics_for_events(in_sample_event_slugs)
+    aggregate_metrics_out_of_sample = _aggregate_metrics_for_events(out_of_sample_event_slugs)
+
+    if partition is None:
+        partition_payload: dict[str, Any] = {
+            "method": "disabled",
+            "seed": partition_seed,
+            "n_events_total": len(event_slugs),
+            "n_events_in_sample": len(in_sample_event_slugs),
+            "n_events_out_of_sample": 0,
+            "in_sample_ratio": 1.0,
+            "out_of_sample_ratio": 0.0,
+            "in_sample_event_slugs": in_sample_event_slugs,
+            "out_of_sample_event_slugs": out_of_sample_event_slugs,
+        }
+    else:
+        partition_payload = partition.to_dict()
+
     best_payload = {
         "event_slugs": event_slugs,
+        "in_sample_event_slugs": in_sample_event_slugs,
+        "out_of_sample_event_slugs": out_of_sample_event_slugs,
         "events_file": str(events_file_path) if events_file_path else None,
         "profile": args.profile,
         "param_config": str(param_config_path),
@@ -804,13 +905,17 @@ def main() -> None:
         "resample_rule": resample_rule or "native",
         "best_score": float(best_score),
         "best_params": best_params,
+        "partition": partition_payload,
         "search_rules": rules,
     }
     best_params_path.write_text(json.dumps(best_payload, indent=2, sort_keys=True))
 
     summary_payload = {
         "best_metrics_mean": aggregate_best_metrics,
+        "best_metrics_mean_in_sample": aggregate_metrics_in_sample,
+        "best_metrics_mean_out_of_sample": aggregate_metrics_out_of_sample,
         "best_metrics_by_event": best_metrics_by_event,
+        "partition": partition_payload,
         "n_best_trades": int(best_trades_rows),
         "best_rerun": bool(args.best_rerun),
         "skip_best_rerun": bool(not args.best_rerun),
@@ -825,6 +930,8 @@ def main() -> None:
     elapsed_seconds = time.perf_counter() - run_start
 
     print(f"Events: {event_slugs}")
+    print(f"In-sample events: {in_sample_event_slugs}")
+    print(f"Out-of-sample events: {out_of_sample_event_slugs}")
     print(f"Profile: {args.profile}")
     print(f"Objective: {args.objective}")
     print(f"Trials run: {n_trials_effective} / requested {args.n_trials}")
