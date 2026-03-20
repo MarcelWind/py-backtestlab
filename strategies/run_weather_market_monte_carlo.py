@@ -16,6 +16,7 @@ Usage example:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import gc
 import json
 import itertools
@@ -34,7 +35,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from stratlab.backtest.backtester import Backtester
+from stratlab.backtest.backtester import Backtester, compute_returns
 from stratlab.config import RESULTS_DIR
 from stratlab.optimize.search import ParamSpec, ParamType
 from stratlab.validation.partition import EventPartition, split_events_in_sample_out_of_sample
@@ -47,6 +48,7 @@ _EMPTY_TRADES_DF = pd.DataFrame()
 
 class EventBundle(TypedDict):
     prices: pd.DataFrame
+    returns: pd.DataFrame
     vwap: pd.DataFrame
     volume: pd.DataFrame
     high: pd.DataFrame | None
@@ -54,6 +56,55 @@ class EventBundle(TypedDict):
     open_: pd.DataFrame | None
     buy_volume: pd.DataFrame | None
     sell_volume: pd.DataFrame | None
+
+
+_MC_WORKER_EVENT_DATA: dict[str, EventBundle] | None = None
+_MC_WORKER_BASE_PARAMS: dict[str, object] | None = None
+_MC_WORKER_REBALANCE_FREQ: int = 1
+_MC_WORKER_OBJECTIVE: str = "sharpe"
+
+
+def _mc_worker_init(
+    event_data: dict[str, EventBundle],
+    base_params: dict[str, object],
+    rebalance_freq: int,
+    objective: str,
+) -> None:
+    """Initialize per-process globals for event-parallel trial evaluation."""
+    global _MC_WORKER_EVENT_DATA, _MC_WORKER_BASE_PARAMS, _MC_WORKER_REBALANCE_FREQ, _MC_WORKER_OBJECTIVE
+    _MC_WORKER_EVENT_DATA = event_data
+    _MC_WORKER_BASE_PARAMS = base_params
+    _MC_WORKER_REBALANCE_FREQ = int(rebalance_freq)
+    _MC_WORKER_OBJECTIVE = objective
+
+
+def _mc_evaluate_event(payload: tuple[str, dict[str, Any]]) -> tuple[str, float, float]:
+    """Evaluate one event for one sampled parameter set inside a worker process."""
+    slug, chosen_params = payload
+    if _MC_WORKER_EVENT_DATA is None or _MC_WORKER_BASE_PARAMS is None:
+        raise RuntimeError("Monte Carlo worker is not initialized")
+
+    bundle = _MC_WORKER_EVENT_DATA[slug]
+    strategy_kwargs = dict(_MC_WORKER_BASE_PARAMS)
+    strategy_kwargs.update(chosen_params)
+    strategy_kwargs["vwap"] = bundle["vwap"]
+    strategy_kwargs["volume"] = bundle["volume"]
+    strategy_kwargs["high"] = bundle["high"]
+    strategy_kwargs["low"] = bundle["low"]
+    strategy_kwargs["open_"] = bundle["open_"]
+    strategy_kwargs["buy_volume"] = bundle["buy_volume"]
+    strategy_kwargs["sell_volume"] = bundle["sell_volume"]
+
+    metrics, _trades = _run_single_backtest(
+        prices=bundle["prices"],
+        returns=bundle["returns"],
+        strategy_kwargs=strategy_kwargs,
+        rebalance_freq=_MC_WORKER_REBALANCE_FREQ,
+        collect_trades=False,
+    )
+    raw_obj = float(metrics.get(_MC_WORKER_OBJECTIVE, 0.0))
+    signed_obj = _metric_direction(_MC_WORKER_OBJECTIVE) * raw_obj
+    return slug, raw_obj, signed_obj
 
 
 def _vprint(verbose: bool, message: str) -> None:
@@ -299,6 +350,7 @@ def _run_trials_with_interrupt_handling(
     rng: np.random.Generator,
     objective: str,
     rebalance_freq: int,
+    workers: int,
     verbose: bool,
     trial_writer: "_TrialCsvWriter",
     top_n: int,
@@ -313,6 +365,8 @@ def _run_trials_with_interrupt_handling(
 
     max_retries_per_trial = 30
     objective_sign = _metric_direction(objective)
+    worker_count = max(1, int(workers))
+    use_process_pool = worker_count > 1 and len(event_data) > 1
 
     # Constraints to avoid sampling settings that exceed available history.
     def _constraints(params: dict[str, Any], prices_df: pd.DataFrame) -> bool:
@@ -329,7 +383,15 @@ def _run_trials_with_interrupt_handling(
         mean_rev_window = int(params.get("mean_reversion_window", base_params.get("mean_reversion_window", 5)))
         return max(slope_lb, imb_lb, mean_rev_window) < bars - 2
 
+    executor: concurrent.futures.ProcessPoolExecutor | None = None
     try:
+        if use_process_pool:
+            executor = concurrent.futures.ProcessPoolExecutor(
+                max_workers=min(worker_count, len(event_data)),
+                initializer=_mc_worker_init,
+                initargs=(event_data, base_params, int(rebalance_freq), objective),
+            )
+
         for trial_idx in range(target_trials):
             _vprint(verbose, f"[trial {trial_idx + 1}/{target_trials}] Sampling candidate parameters")
             chosen_params: dict[str, Any] | None = None
@@ -359,39 +421,58 @@ def _run_trials_with_interrupt_handling(
             per_event_scores_out_of_sample: dict[str, float] = {}
             row: dict[str, Any] = dict(chosen_params)
 
-            for slug, bundle in event_data.items():
-                _vprint(
-                    verbose,
-                    f"[trial {trial_idx + 1}/{target_trials}] Running backtest for event '{slug}'",
-                )
-                strategy_kwargs = dict(base_params)
-                strategy_kwargs.update(chosen_params)
-                strategy_kwargs["vwap"] = bundle["vwap"]
-                strategy_kwargs["volume"] = bundle["volume"]
-                strategy_kwargs["high"] = bundle["high"]
-                strategy_kwargs["low"] = bundle["low"]
-                strategy_kwargs["open_"] = bundle["open_"]
-                strategy_kwargs["buy_volume"] = bundle["buy_volume"]
-                strategy_kwargs["sell_volume"] = bundle["sell_volume"]
+            if use_process_pool and executor is not None:
+                futures = {
+                    executor.submit(_mc_evaluate_event, (slug, chosen_params)): slug
+                    for slug in event_data.keys()
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    slug, raw_obj, signed_obj = future.result()
+                    per_event_scores[slug] = signed_obj
+                    if slug in in_sample_event_slugs:
+                        per_event_scores_in_sample[slug] = signed_obj
+                    elif slug in out_of_sample_event_slugs:
+                        per_event_scores_out_of_sample[slug] = signed_obj
+                    row[f"m_{slug}_{objective}"] = raw_obj
+                    _vprint(
+                        verbose,
+                        f"[trial {trial_idx + 1}/{target_trials}] Event '{slug}' {objective}={raw_obj:.6f}",
+                    )
+            else:
+                for slug, bundle in event_data.items():
+                    _vprint(
+                        verbose,
+                        f"[trial {trial_idx + 1}/{target_trials}] Running backtest for event '{slug}'",
+                    )
+                    strategy_kwargs = dict(base_params)
+                    strategy_kwargs.update(chosen_params)
+                    strategy_kwargs["vwap"] = bundle["vwap"]
+                    strategy_kwargs["volume"] = bundle["volume"]
+                    strategy_kwargs["high"] = bundle["high"]
+                    strategy_kwargs["low"] = bundle["low"]
+                    strategy_kwargs["open_"] = bundle["open_"]
+                    strategy_kwargs["buy_volume"] = bundle["buy_volume"]
+                    strategy_kwargs["sell_volume"] = bundle["sell_volume"]
 
-                metrics, _trades = _run_single_backtest(
-                    prices=bundle["prices"],
-                    strategy_kwargs=strategy_kwargs,
-                    rebalance_freq=rebalance_freq,
-                    collect_trades=False,
-                )
-                raw_obj = float(metrics.get(objective, 0.0))
-                signed_obj = objective_sign * raw_obj
-                per_event_scores[slug] = signed_obj
-                if slug in in_sample_event_slugs:
-                    per_event_scores_in_sample[slug] = signed_obj
-                elif slug in out_of_sample_event_slugs:
-                    per_event_scores_out_of_sample[slug] = signed_obj
-                row[f"m_{slug}_{objective}"] = raw_obj
-                _vprint(
-                    verbose,
-                    f"[trial {trial_idx + 1}/{target_trials}] Event '{slug}' {objective}={raw_obj:.6f}",
-                )
+                    metrics, _trades = _run_single_backtest(
+                        prices=bundle["prices"],
+                        returns=bundle["returns"],
+                        strategy_kwargs=strategy_kwargs,
+                        rebalance_freq=rebalance_freq,
+                        collect_trades=False,
+                    )
+                    raw_obj = float(metrics.get(objective, 0.0))
+                    signed_obj = objective_sign * raw_obj
+                    per_event_scores[slug] = signed_obj
+                    if slug in in_sample_event_slugs:
+                        per_event_scores_in_sample[slug] = signed_obj
+                    elif slug in out_of_sample_event_slugs:
+                        per_event_scores_out_of_sample[slug] = signed_obj
+                    row[f"m_{slug}_{objective}"] = raw_obj
+                    _vprint(
+                        verbose,
+                        f"[trial {trial_idx + 1}/{target_trials}] Event '{slug}' {objective}={raw_obj:.6f}",
+                    )
 
             agg_score = (
                 float(np.mean(list(per_event_scores_in_sample.values())))
@@ -435,6 +516,8 @@ def _run_trials_with_interrupt_handling(
         interrupted = True
         print("KeyboardInterrupt received. Saving partial Monte Carlo results...")
     finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
         trial_writer.flush()
 
     return rows_written, best_score, best_params, interrupted, top_rows
@@ -442,6 +525,7 @@ def _run_trials_with_interrupt_handling(
 
 def _run_single_backtest(
     prices: pd.DataFrame,
+    returns: pd.DataFrame | None,
     strategy_kwargs: dict[str, Any],
     rebalance_freq: int,
     collect_trades: bool = True,
@@ -449,8 +533,10 @@ def _run_single_backtest(
     strategy_kwargs = dict(strategy_kwargs)
     strategy_kwargs.setdefault("track_delta_history", False)
     strategy = WeatherMarketImbalanceStrategy(**strategy_kwargs)
+    setattr(strategy, "record_indicator_history", False)
     result = Backtester(strategy=strategy, rebalance_freq=rebalance_freq).run(
         prices,
+        precomputed_returns=returns,
         include_returns=False,
         include_weights=False,
         include_indicator_signals=False,
@@ -500,6 +586,7 @@ def _load_event_bundle(
     )
 
     prices = cast(pd.DataFrame, _to_float32_frame(prices))
+    returns = cast(pd.DataFrame, _to_float32_frame(compute_returns(prices)))
     vwap = cast(pd.DataFrame, _to_float32_frame(vwap))
     volume = cast(pd.DataFrame, _to_float32_frame(volume))
     high = _to_float32_frame(high)
@@ -510,6 +597,7 @@ def _load_event_bundle(
 
     return {
         "prices": prices,
+        "returns": returns,
         "vwap": vwap,
         "volume": volume,
         "high": high,
@@ -608,6 +696,15 @@ def main() -> None:
         help="Backtester rebalance frequency for all trials.",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help=(
+            "Number of worker processes for parallel event evaluation per trial. "
+            "Use 1 to disable multiprocessing."
+        ),
+    )
+    parser.add_argument(
         "--top-n",
         type=int,
         default=20,
@@ -644,6 +741,8 @@ def main() -> None:
         raise ValueError("--n-trials must be > 0")
     if args.rebalance_freq <= 0:
         raise ValueError("--rebalance-freq must be > 0")
+    if args.workers <= 0:
+        raise ValueError("--workers must be > 0")
     if not (0.0 < float(args.out_of_sample_ratio) < 1.0):
         raise ValueError("--out-of-sample-ratio must be between 0 and 1")
 
@@ -738,7 +837,7 @@ def main() -> None:
         bool(args.verbose),
         (
             "Prepared parameter search "
-            f"(target_trials={target_trials}, max_possible={max_possible_trials})"
+            f"(target_trials={target_trials}, max_possible={max_possible_trials}, workers={args.workers})"
         ),
     )
 
@@ -772,6 +871,7 @@ def main() -> None:
             rng=rng,
             objective=args.objective,
             rebalance_freq=int(args.rebalance_freq),
+            workers=int(args.workers),
             verbose=bool(args.verbose),
             trial_writer=writer,
             top_n=top_n,
@@ -826,6 +926,7 @@ def main() -> None:
 
             event_metrics, event_trades = _run_single_backtest(
                 prices=bundle["prices"],
+                returns=bundle["returns"],
                 strategy_kwargs=best_strategy_kwargs,
                 rebalance_freq=int(best_params.get("rebalance_freq", args.rebalance_freq)),
                 collect_trades=True,

@@ -772,7 +772,30 @@ class WeatherMarketImbalanceStrategy(Strategy):
         index: int,
     ) -> np.ndarray:
         assets = prices.columns.tolist()
+        assets_set = set(assets)
         current_ts = pd.Timestamp(prices.index[index])
+        prices_row = prices.iloc[index]
+        inds = getattr(self, "indicators", {})
+
+        def _indicator_asset_value(indicator_value: object, asset: str) -> float:
+            if indicator_value is None:
+                return float("nan")
+            try:
+                return float(cast(pd.Series, indicator_value).get(asset, float("nan")))
+            except Exception:
+                return float("nan")
+
+        def _read_cum(cum_name: str, asset: str) -> float:
+            series = inds.get(cum_name)
+            if series is None:
+                return float("nan")
+            try:
+                return float(cast(pd.DataFrame, series).iloc[index].get(asset, float("nan")))
+            except Exception:
+                try:
+                    return float(cast(pd.Series, series).get(asset, float("nan")))
+                except Exception:
+                    return float("nan")
 
         # Trailing-stop: recompute stored stop_price for open positions
         # using current bands/VWAP so stops can move as indicators evolve.
@@ -787,10 +810,10 @@ class WeatherMarketImbalanceStrategy(Strategy):
                     continue
             if sl_obj is not None:
                 for asset in list(self._positions.keys()):
-                    if asset not in assets:
+                    if asset not in assets_set:
                         continue
                     try:
-                        cur_price = float(prices.iloc[index][asset])
+                        cur_price = float(prices_row.get(asset, float("nan")))
                     except Exception:
                         continue
                     if np.isnan(cur_price) or cur_price <= 0:
@@ -812,10 +835,10 @@ class WeatherMarketImbalanceStrategy(Strategy):
         # Exit checks on existing positions
         to_close = []
         for asset in list(self._positions.keys()):
-            if asset not in assets:
+            if asset not in assets_set:
                 to_close.append((asset, "asset_missing"))
                 continue
-            current_price = float(prices.iloc[index][asset])
+            current_price = float(prices_row.get(asset, float("nan")))
             if np.isnan(current_price) or current_price <= 0:
                 continue
             exit_reason = self._should_exit(asset, current_price, index, prices)
@@ -823,10 +846,10 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 to_close.append((asset, exit_reason))
 
         for asset, reason in to_close:
-            if asset not in assets:
+            if asset not in assets_set:
                 self._positions.pop(asset, None)
                 continue
-            close_price = float(prices.iloc[index][asset])
+            close_price = float(prices_row.get(asset, float("nan")))
             if np.isnan(close_price) or close_price <= 0:
                 self._positions.pop(asset, None)
                 continue
@@ -853,31 +876,20 @@ class WeatherMarketImbalanceStrategy(Strategy):
         else:
             start = max(0, index - self.lookback + 1)
             need_full_window = False
+        prices_window = prices.iloc[start : index + 1]
+
+        vwap_slope_values = inds.get("vwap_slope")
+        vwap_slope_raw_values = inds.get("vwap_slope_raw")
+        vwap_imbalance_values = inds.get("vwap_volume_imbalance")
 
         for asset in assets:
-            # read precomputed indicators instead of calling the function
-            inds = getattr(self, "indicators", {})
-            def _read_cum(name: str) -> float:
-                series = inds.get(name)
-                if series is None:
-                    return float("nan")
-                try:
-                    # DataFrame with time index x asset columns
-                    return float(series.iloc[index].get(asset, float("nan")))
-                except Exception:
-                    try:
-                        # Series mapping asset -> value
-                        return float(series.get(asset, float("nan")))
-                    except Exception:
-                        return float("nan")
-
-            buy_delta = _read_cum("cum_buy_delta")
-            sell_delta = _read_cum("cum_sell_delta")
+            buy_delta = _read_cum("cum_buy_delta", asset)
+            sell_delta = _read_cum("cum_sell_delta", asset)
             if self.track_delta_history:
                 self.buy_delta_history.append((index, asset, buy_delta))
                 self.sell_delta_history.append((index, asset, sell_delta))
 
-            asset_window = prices.iloc[start : index + 1][asset].dropna().to_numpy(dtype=float)
+            asset_window = prices_window[asset].dropna().to_numpy(dtype=float)
             if len(asset_window) < max(2, self.lookback // 2):
                 continue
 
@@ -912,8 +924,12 @@ class WeatherMarketImbalanceStrategy(Strategy):
             slope = 0.0
             raw_slope = 0.0
             if self.use_vwap_slope_filter:
-                slope = float(self.indicators["vwap_slope"].get(asset, 0.0))
-                raw_slope = float(self.indicators["vwap_slope_raw"].get(asset, 0.0))
+                slope = _indicator_asset_value(vwap_slope_values, asset)
+                raw_slope = _indicator_asset_value(vwap_slope_raw_values, asset)
+                if not math.isfinite(slope):
+                    slope = 0.0
+                if not math.isfinite(raw_slope):
+                    raw_slope = 0.0
                 if entry_side == "short":
                     if slope > self.max_vwap_slope_for_short:
                         continue
@@ -923,7 +939,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
 
             imbalance_pct = float("nan")
             if self.use_vwap_volume_imbalance_filter:
-                imbalance_pct = float(self.indicators["vwap_volume_imbalance"].get(asset, float("nan")))
+                imbalance_pct = _indicator_asset_value(vwap_imbalance_values, asset)
                 if np.isnan(imbalance_pct):
                     continue
                 if entry_side == "short":
@@ -1043,7 +1059,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
         ) in ranked_entries:
             if asset in self._positions:
                 continue
-            entry_price = float(prices.iloc[index][asset])
+            entry_price = float(prices_row.get(asset, float("nan")))
             if np.isnan(entry_price) or entry_price <= 0:
                 continue
             # Enforce min/max price guards to avoid re-entries at near-zero prices
@@ -1064,9 +1080,9 @@ class WeatherMarketImbalanceStrategy(Strategy):
             )
             # compute stop_price and tp_price at entry time using indicator helpers
             stop_price = float("nan")
+            sl_obj = None
             if self.use_stop_loss:
                 # find StopLossIndicator instance
-                sl_obj = None
                 for ind in getattr(self, "indicator_defs", []):
                     try:
                         if isinstance(ind, StopLossIndicator):
@@ -1087,8 +1103,8 @@ class WeatherMarketImbalanceStrategy(Strategy):
                         stop_price = float("nan")
 
             tp_price = float("nan")
+            tp_obj = None
             if self.use_take_profit:
-                tp_obj = None
                 for ind in getattr(self, "indicator_defs", []):
                     try:
                         if isinstance(ind, TakeProfitIndicator):

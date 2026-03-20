@@ -33,6 +33,7 @@ class Backtester:
         self,
         prices: pd.DataFrame,
         *,
+        precomputed_returns: pd.DataFrame | None = None,
         include_returns: bool = True,
         include_weights: bool = True,
         include_indicator_signals: bool = True,
@@ -42,6 +43,8 @@ class Backtester:
 
         Args:
             prices: DataFrame of close prices (rows=dates, cols=assets)
+                        precomputed_returns: Optional returns DataFrame aligned to `prices`.
+                            When provided, avoids recomputing `pct_change()` for repeated runs.
 
         Returns:
             Dict with keys:
@@ -60,7 +63,7 @@ class Backtester:
             setattr(self.strategy, "record_indicator_history", False)
 
         try:
-            returns = compute_returns(prices)
+            returns = precomputed_returns if precomputed_returns is not None else compute_returns(prices)
             n_days = len(returns)
             assets = returns.columns.tolist()
             lookback = self.strategy.lookback
