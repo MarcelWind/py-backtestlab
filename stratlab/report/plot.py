@@ -261,6 +261,105 @@ def plot_comparison(
     return fig
 
 
+def plot_permutation_cumulative_log_returns(
+    is_curves: list[pd.Series],
+    oos_curves: list[pd.Series],
+    *,
+    real_is_curve: pd.Series | None = None,
+    real_oos_curve: pd.Series | None = None,
+    title: str = "Permutation Test",
+    subtitle: str | None = None,
+    figsize: tuple[float, float] = (14, 8),
+) -> Figure:
+    """Overlay IS/OOS permutation curves and highlighted real curves.
+
+    The y-axis is expected to be cumulative log return.
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+    fig.patch.set_facecolor("black")
+    ax.set_facecolor("black")
+
+    is_label_used = False
+    for curve in is_curves:
+        if curve is None or curve.empty:
+            continue
+        x = np.arange(len(curve))
+        ax.plot(
+            x,
+            curve.to_numpy(dtype=float),
+            color="white",
+            alpha=0.10,
+            linewidth=1.0,
+            label=("IS Permutation" if not is_label_used else None),
+            zorder=1,
+        )
+        is_label_used = True
+
+    oos_label_used = False
+    for curve in oos_curves:
+        if curve is None or curve.empty:
+            continue
+        x = np.arange(len(curve))
+        ax.plot(
+            x,
+            curve.to_numpy(dtype=float),
+            color="0.70",
+            alpha=0.14,
+            linewidth=1.0,
+            label=("OS Permutation" if not oos_label_used else None),
+            zorder=1,
+        )
+        oos_label_used = True
+
+    if real_is_curve is not None and not real_is_curve.empty:
+        x_is = np.arange(len(real_is_curve))
+        ax.plot(
+            x_is,
+            real_is_curve.to_numpy(dtype=float),
+            color="red",
+            linewidth=2.4,
+            alpha=0.95,
+            label="Real Optimized IS",
+            zorder=3,
+        )
+
+    if real_oos_curve is not None and not real_oos_curve.empty:
+        x_oos = np.arange(len(real_oos_curve))
+        ax.plot(
+            x_oos,
+            real_oos_curve.to_numpy(dtype=float),
+            color="#34d4ff",
+            linewidth=2.2,
+            alpha=0.95,
+            label="Real Optimized OS",
+            zorder=3,
+        )
+
+    ax.set_xlabel("Bars", color="white", fontsize=12)
+    ax.set_ylabel("Cumulative Log Return", color="white", fontsize=12)
+    ax.tick_params(colors="0.85", labelsize=10)
+    for spine in ax.spines.values():
+        spine.set_color("0.8")
+
+    ax.grid(color="0.3", alpha=0.25)
+    ax.axhline(0.0, color="0.6", linewidth=1.0, alpha=0.8)
+
+    if subtitle:
+        ax.set_title(f"{title}\n{subtitle}", color="#36ff5a", fontsize=18, fontweight="bold")
+    else:
+        ax.set_title(title, color="#36ff5a", fontsize=18, fontweight="bold")
+
+    leg = ax.legend(loc="upper left", frameon=True, fontsize=10)
+    if leg is not None:
+        leg.get_frame().set_facecolor("black")
+        leg.get_frame().set_edgecolor("0.8")
+        for txt in leg.get_texts():
+            txt.set_color("white")
+
+    plt.tight_layout()
+    return fig
+
+
 def plot_rolling_correlation(
     results_a: dict,
     results_b: dict,

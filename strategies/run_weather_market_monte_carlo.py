@@ -19,9 +19,6 @@ import argparse
 import concurrent.futures
 import gc
 import json
-import itertools
-import math
-import csv
 import sys
 import time
 from pathlib import Path
@@ -37,8 +34,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from stratlab.backtest.backtester import Backtester, compute_returns
 from stratlab.config import RESULTS_DIR
-from stratlab.optimize.search import ParamSpec, ParamType
+from stratlab.data.dtype_utils import to_float32_frame
+from stratlab.io.csv_writer import TrialCsvWriter
+from stratlab.io.events import load_event_slugs_from_file
+from stratlab.optimize.rule_search import estimate_max_unique_trials, load_param_rules, params_key, sample_trial_params
 from stratlab.validation.partition import EventPartition, split_events_in_sample_out_of_sample
+from stratlab.validation.significance import empirical_one_tailed_pvalue, walk_forward_pvalue_from_event_order
 from strategies.weather_backtest import load_event_ohlcv_resampled_with_unfiltered_cvd
 from strategies.weather_market_strategy import WeatherMarketImbalanceStrategy
 
@@ -143,222 +144,23 @@ def _format_elapsed(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
-def _json_error_context(text: str, lineno: int, radius: int = 2) -> str:
-    """Build a compact line-context snippet for JSON decode errors."""
-    lines = text.splitlines()
-    if not lines:
-        return ""
-    idx = max(0, lineno - 1)
-    start = max(0, idx - radius)
-    end = min(len(lines), idx + radius + 1)
-    snippet = []
-    for i in range(start, end):
-        prefix = ">" if i == idx else " "
-        snippet.append(f"{prefix} {i + 1:4d}: {lines[i]}")
-    return "\n".join(snippet)
-
-
-def _load_param_rules(config_path: Path) -> list[dict[str, Any]]:
-    """Load Monte Carlo parameter rules from JSON file."""
-    try:
-        text = config_path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise ValueError(f"Parameter config file not found: {config_path}") from exc
-
-    try:
-        raw = json.loads(text)
-    except json.JSONDecodeError as exc:
-        context = _json_error_context(text, exc.lineno)
-        raise ValueError(
-            f"Parameter config is not valid JSON: {config_path} "
-            f"(line {exc.lineno}, column {exc.colno}): {exc.msg}\n{context}"
-        ) from exc
-
-    rules = raw.get("parameters", [])
-    if not isinstance(rules, list) or not rules:
-        raise ValueError(f"Invalid parameter config at {config_path}: expected non-empty 'parameters' list")
-
-    seen: set[str] = set()
-    for rule in rules:
-        if not isinstance(rule, dict):
-            raise ValueError("Each parameter rule must be an object")
-        name = str(rule.get("name", "")).strip()
-        if not name:
-            raise ValueError("Each parameter rule must include a non-empty 'name'")
-        if name in seen:
-            raise ValueError(f"Duplicate parameter rule for {name!r}")
-        seen.add(name)
-        rule_type = str(rule.get("type", "")).strip()
-        if rule_type not in {"bool", "choice", "int", "float", "log_float"}:
-            raise ValueError(f"Unsupported rule type {rule_type!r} for parameter {name!r}")
-        if rule_type in {"bool", "choice"}:
-            values = rule.get("values")
-            if not isinstance(values, list) or not values:
-                raise ValueError(f"Rule {name!r} of type {rule_type!r} requires non-empty 'values'")
-            if rule_type == "bool" and not all(isinstance(v, bool) for v in values):
-                raise ValueError(f"Boolean rule {name!r} must contain only true/false values")
-        else:
-            if "low" not in rule or "high" not in rule:
-                raise ValueError(f"Numeric rule {name!r} requires 'low' and 'high'")
-    return rules
-
-
-def _load_event_slugs_from_file(events_file: Path) -> list[str]:
-    """Load event slugs from a JSON file.
-
-    Supported formats:
-    - ["slug-a", "slug-b"]
-    - {"event_slugs": ["slug-a", "slug-b"]}
-    - {"events": ["slug-a", {"slug": "slug-b"}, {"event_slug": "slug-c"}]}
-    """
-    try:
-        raw = json.loads(events_file.read_text())
-    except FileNotFoundError as exc:
-        raise ValueError(f"Events file not found: {events_file}") from exc
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Events file is not valid JSON: {events_file} ({exc})") from exc
-
-    if isinstance(raw, list):
-        candidates = raw
-    elif isinstance(raw, dict):
-        if "event_slugs" in raw:
-            candidates = raw["event_slugs"]
-        elif "events" in raw:
-            candidates = raw["events"]
-        else:
-            raise ValueError(
-                f"Invalid events file {events_file}: expected top-level list, 'event_slugs', or 'events'"
-            )
-    else:
-        raise ValueError(f"Invalid events file {events_file}: expected JSON list or object")
-
-    if not isinstance(candidates, list):
-        raise ValueError(f"Invalid events file {events_file}: events payload must be a list")
-
-    slugs: list[str] = []
-    for idx, item in enumerate(candidates):
-        if isinstance(item, str):
-            slug = item.strip()
-        elif isinstance(item, dict):
-            raw_slug = item.get("event_slug", item.get("slug", ""))
-            slug = str(raw_slug).strip()
-        else:
-            raise ValueError(f"Invalid event entry at index {idx} in {events_file}: expected string or object")
-
-        if not slug:
-            raise ValueError(f"Invalid event entry at index {idx} in {events_file}: empty slug")
-        slugs.append(slug)
-
-    return slugs
-
-
-def _rule_enabled(rule: dict[str, Any], chosen: dict[str, Any], base_params: dict[str, object]) -> bool:
-    cond = rule.get("enabled_if", {})
-    if not cond:
-        return True
-    if not isinstance(cond, dict):
-        raise ValueError(f"enabled_if for {rule.get('name')} must be a mapping")
-    for dep_name, dep_val in cond.items():
-        actual = chosen.get(dep_name, base_params.get(dep_name))
-        if actual != dep_val:
-            return False
-    return True
-
-
-def _rule_to_spec(rule: dict[str, Any]) -> ParamSpec:
-    low = float(rule["low"])
-    high = float(rule["high"])
-    rtype = str(rule["type"])
-    if rtype == "int":
-        return ParamSpec(low=int(round(low)), high=int(round(high)), param_type=ParamType.INT)
-    if rtype == "log_float":
-        return ParamSpec(low=low, high=high, param_type=ParamType.LOG_FLOAT)
-    return ParamSpec(low=low, high=high, param_type=ParamType.FLOAT)
-
-
-def _sample_trial_params(
-    rules: list[dict[str, Any]],
-    base_params: dict[str, object],
-    rng: np.random.Generator,
-) -> dict[str, Any]:
-    """Sample one candidate respecting enabled_if conditions."""
-    sampled: dict[str, Any] = {}
-    for rule in rules:
-        name = str(rule["name"])
-        if not _rule_enabled(rule, sampled, base_params):
-            continue
-
-        rtype = str(rule["type"])
-        if rtype in {"bool", "choice"}:
-            values = rule.get("values", [True, False])
-            sampled[name] = values[int(rng.integers(0, len(values)))]
-            continue
-
-        spec = _rule_to_spec(rule)
-        raw_val = spec.sample(rng)
-        step = float(rule.get("step", 0.0))
-        if spec.param_type in (ParamType.INT, ParamType.LOG_INT):
-            sampled[name] = int(round(_round_to_step(float(raw_val), max(1.0, step), spec.low, spec.high)))
-        else:
-            sampled[name] = float(_round_to_step(float(raw_val), step, spec.low, spec.high))
-    return sampled
-
-
-def _estimate_max_unique_trials(rules: list[dict[str, Any]], base_params: dict[str, object]) -> int | None:
-    """Estimate unique parameter combinations implied by rule steps and booleans."""
-    discrete_rules = [r for r in rules if str(r.get("type")) in {"bool", "choice"}]
-    num_rules = [r for r in rules if str(r.get("type")) not in {"bool", "choice"}]
-
-    # Build all discrete assignments.
-    discrete_value_lists: list[list[Any]] = [list(r.get("values", [True, False])) for r in discrete_rules]
-    total = 0
-    for combo in itertools.product(*discrete_value_lists) if discrete_value_lists else [()]:
-        chosen_discrete = {str(r["name"]): combo[i] for i, r in enumerate(discrete_rules)}
-        branch_product = 1
-        for rule in num_rules:
-            if not _rule_enabled(rule, chosen_discrete, base_params):
-                continue
-            low = float(rule["low"])
-            high = float(rule["high"])
-            if low == high:
-                levels = 1
-            else:
-                step = float(rule.get("step", 0.0))
-                if step <= 0:
-                    return None
-                levels = int(max(0, math.floor((high - low) / step) + 1))
-                levels = max(1, levels)
-            branch_product *= levels
-        total += branch_product
-    return int(total)
-
-
-def _round_to_step(value: float, step: float, low: float, high: float) -> float:
-    if step <= 0:
-        return float(min(max(value, low), high))
-    snapped = low + round((value - low) / step) * step
-    return float(min(max(snapped, low), high))
-
-
-def _params_key(params: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
-    return tuple(sorted(params.items(), key=lambda x: x[0]))
-
-
 def _run_trials_with_interrupt_handling(
     target_trials: int,
     rules: list[dict[str, Any]],
     base_params: dict[str, object],
     event_data: dict[str, EventBundle],
-    in_sample_event_slugs: set[str],
-    out_of_sample_event_slugs: set[str],
+    in_sample_event_slugs: list[str],
+    out_of_sample_event_slugs: list[str],
     rng: np.random.Generator,
     objective: str,
     rebalance_freq: int,
     workers: int,
     verbose: bool,
-    trial_writer: "_TrialCsvWriter",
+    trial_writer: "TrialCsvWriter",
     top_n: int,
-) -> tuple[int, float, dict[str, Any] | None, bool, list[dict[str, Any]]]:
+    is_pvalue_threshold: float,
+    oos_pvalue_threshold: float,
+) -> tuple[int, float, dict[str, Any] | None, bool, list[dict[str, Any]], dict[str, int]]:
     """Run Monte Carlo trials and return partial results if interrupted."""
     seen: set[tuple[tuple[str, Any], ...]] = set()
     rows_written = 0
@@ -371,6 +173,13 @@ def _run_trials_with_interrupt_handling(
     objective_sign = _metric_direction(objective)
     worker_count = max(1, int(workers))
     use_process_pool = worker_count > 1 and len(event_data) > 1
+    in_sample_event_set = set(in_sample_event_slugs)
+    out_of_sample_event_set = set(out_of_sample_event_slugs)
+    historical_in_sample_scores: list[float] = []
+    historical_oos_prefix_scores: dict[int, list[float]] = {}
+    accepted_trials = 0
+    rejected_trials_is = 0
+    rejected_trials_oos = 0
 
     # Constraints to avoid sampling settings that exceed available history.
     def _constraints(params: dict[str, Any], prices_df: pd.DataFrame) -> bool:
@@ -400,8 +209,8 @@ def _run_trials_with_interrupt_handling(
             _vprint(verbose, f"[trial {trial_idx + 1}/{target_trials}] Sampling candidate parameters")
             chosen_params: dict[str, Any] | None = None
             for _ in range(max_retries_per_trial):
-                sampled = _sample_trial_params(rules, base_params, rng)
-                pkey = _params_key(sampled)
+                sampled = sample_trial_params(rules, base_params, rng)
+                pkey = params_key(sampled)
                 if pkey in seen:
                     continue
                 merged_candidate = dict(base_params)
@@ -433,9 +242,9 @@ def _run_trials_with_interrupt_handling(
                 for future in concurrent.futures.as_completed(futures):
                     slug, raw_obj, signed_obj = future.result()
                     per_event_scores[slug] = signed_obj
-                    if slug in in_sample_event_slugs:
+                    if slug in in_sample_event_set:
                         per_event_scores_in_sample[slug] = signed_obj
-                    elif slug in out_of_sample_event_slugs:
+                    elif slug in out_of_sample_event_set:
                         per_event_scores_out_of_sample[slug] = signed_obj
                     row[f"m_{slug}_{objective}"] = raw_obj
                     _vprint(
@@ -469,9 +278,9 @@ def _run_trials_with_interrupt_handling(
                     raw_obj = float(metrics.get(objective, 0.0))
                     signed_obj = objective_sign * raw_obj
                     per_event_scores[slug] = signed_obj
-                    if slug in in_sample_event_slugs:
+                    if slug in in_sample_event_set:
                         per_event_scores_in_sample[slug] = signed_obj
-                    elif slug in out_of_sample_event_slugs:
+                    elif slug in out_of_sample_event_set:
                         per_event_scores_out_of_sample[slug] = signed_obj
                     row[f"m_{slug}_{objective}"] = raw_obj
                     _vprint(
@@ -496,16 +305,52 @@ def _run_trials_with_interrupt_handling(
             row["_event_count_in_sample"] = len(per_event_scores_in_sample)
             row["_event_count_out_of_sample"] = len(per_event_scores_out_of_sample)
 
+            is_pvalue = empirical_one_tailed_pvalue(agg_score, historical_in_sample_scores)
+            oos_pvalue = walk_forward_pvalue_from_event_order(
+                event_scores=per_event_scores_out_of_sample,
+                ordered_oos_slugs=out_of_sample_event_slugs,
+                historical_prefix_scores=historical_oos_prefix_scores,
+            )
+            is_gate_pass = bool(is_pvalue < float(is_pvalue_threshold))
+            oos_gate_pass = bool((not out_of_sample_event_slugs) or (oos_pvalue < float(oos_pvalue_threshold)))
+            accepted = bool(is_gate_pass and oos_gate_pass)
+            row["_pvalue_in_sample"] = is_pvalue
+            row["_pvalue_out_of_sample_walk_forward"] = oos_pvalue
+            row["_gate_in_sample_pass"] = is_gate_pass
+            row["_gate_out_of_sample_pass"] = oos_gate_pass
+            row["_accepted"] = accepted
+
             # Stream each trial row to disk immediately to avoid holding the full
             # trial history in memory for large runs.
             trial_writer.write_row(row)
             rows_written += 1
 
-            top_rows.append(row)
-            if len(top_rows) > top_n:
-                top_rows = sorted(top_rows, key=lambda r: float(r.get("_objective", float("-inf"))), reverse=True)[:top_n]
+            if accepted:
+                accepted_trials += 1
+            else:
+                if not is_gate_pass:
+                    rejected_trials_is += 1
+                if not oos_gate_pass:
+                    rejected_trials_oos += 1
 
-            if agg_score > best_score:
+            if np.isfinite(agg_score):
+                historical_in_sample_scores.append(float(agg_score))
+            if out_of_sample_event_slugs:
+                prefix_scores: list[float] = []
+                for idx, slug in enumerate(out_of_sample_event_slugs, start=1):
+                    score = per_event_scores_out_of_sample.get(slug)
+                    if score is None or not np.isfinite(score):
+                        break
+                    prefix_scores.append(float(score))
+                    prefix_mean = float(np.mean(prefix_scores))
+                    historical_oos_prefix_scores.setdefault(idx, []).append(prefix_mean)
+
+            if accepted:
+                top_rows.append(row)
+                if len(top_rows) > top_n:
+                    top_rows = sorted(top_rows, key=lambda r: float(r.get("_objective", float("-inf"))), reverse=True)[:top_n]
+
+            if accepted and agg_score > best_score:
                 best_score = agg_score
                 best_params = dict(chosen_params)
                 _vprint(
@@ -525,7 +370,12 @@ def _run_trials_with_interrupt_handling(
             executor.shutdown(wait=True, cancel_futures=True)
         trial_writer.flush()
 
-    return rows_written, best_score, best_params, interrupted, top_rows
+    acceptance_stats = {
+        "accepted_trials": int(accepted_trials),
+        "rejected_trials_in_sample_gate": int(rejected_trials_is),
+        "rejected_trials_out_of_sample_gate": int(rejected_trials_oos),
+    }
+    return rows_written, best_score, best_params, interrupted, top_rows, acceptance_stats
 
 
 def _run_single_backtest(
@@ -544,7 +394,7 @@ def _run_single_backtest(
         for ind in strategy.indicator_defs:
             snap = indicator_snapshots.get(ind.name)
             if snap is not None:
-                ind.restore(snap)
+                cast(Any, ind).restore(snap)
     result = Backtester(strategy=strategy, rebalance_freq=rebalance_freq).run(
         prices,
         precomputed_returns=returns,
@@ -557,32 +407,6 @@ def _run_single_backtest(
     trades_df = pd.DataFrame(strategy.trade_log) if collect_trades else _EMPTY_TRADES_DF
     strategy.trade_log.clear()
     return metrics, trades_df
-
-
-class _TrialCsvWriter:
-    """CSV writer that discovers headers from the first row and streams append writes."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._f = path.open("w", newline="")
-        self._writer: csv.DictWriter[str] | None = None
-        self._header: list[str] = []
-
-    def write_row(self, row: dict[str, Any]) -> None:
-        if self._writer is None:
-            self._header = list(row.keys())
-            self._writer = csv.DictWriter(self._f, fieldnames=self._header, extrasaction="ignore")
-            self._writer.writeheader()
-        self._writer.writerow({k: row.get(k) for k in self._header})
-        if self._f.tell() % (1024 * 128) < 1024:
-            self._f.flush()
-
-    def close(self) -> None:
-        self._f.flush()
-        self._f.close()
-
-    def flush(self) -> None:
-        self._f.flush()
 
 
 def _precompute_indicator_snapshots(
@@ -616,7 +440,7 @@ def _precompute_indicator_snapshots(
         include_indicator_signals=False,
     )
     return {
-        ind.name: ind.snapshot()
+        ind.name: cast(Any, ind).snapshot()
         for ind in strategy.indicator_defs
         if hasattr(ind, "snapshot")
     }
@@ -633,15 +457,15 @@ def _load_event_bundle(
         prefer_outcome=prefer_outcome,
     )
 
-    prices = cast(pd.DataFrame, _to_float32_frame(prices))
-    returns = cast(pd.DataFrame, _to_float32_frame(compute_returns(prices)))
-    vwap = cast(pd.DataFrame, _to_float32_frame(vwap))
-    volume = cast(pd.DataFrame, _to_float32_frame(volume))
-    high = _to_float32_frame(high)
-    low = _to_float32_frame(low)
-    open_ = _to_float32_frame(open_)
-    buy_volume_full = _to_float32_frame(buy_volume_full)
-    sell_volume_full = _to_float32_frame(sell_volume_full)
+    prices = cast(pd.DataFrame, to_float32_frame(prices))
+    returns = cast(pd.DataFrame, to_float32_frame(compute_returns(prices)))
+    vwap = cast(pd.DataFrame, to_float32_frame(vwap))
+    volume = cast(pd.DataFrame, to_float32_frame(volume))
+    high = to_float32_frame(high)
+    low = to_float32_frame(low)
+    open_ = to_float32_frame(open_)
+    buy_volume_full = to_float32_frame(buy_volume_full)
+    sell_volume_full = to_float32_frame(sell_volume_full)
 
     return {
         "prices": prices,
@@ -784,6 +608,18 @@ def main() -> None:
         default=None,
         help="Override preset allow_shorts flag for this run.",
     )
+    parser.add_argument(
+        "--is-pvalue-threshold",
+        type=float,
+        default=0.01,
+        help="Accept trial only if in-sample empirical p-value is below this threshold.",
+    )
+    parser.add_argument(
+        "--oos-pvalue-threshold",
+        type=float,
+        default=0.05,
+        help="Accept trial only if OOS walk-forward empirical p-value is below this threshold.",
+    )
     args = parser.parse_args()
 
     if args.n_trials <= 0:
@@ -794,6 +630,10 @@ def main() -> None:
         raise ValueError("--workers must be > 0")
     if not (0.0 < float(args.out_of_sample_ratio) < 1.0):
         raise ValueError("--out-of-sample-ratio must be between 0 and 1")
+    if not (0.0 < float(args.is_pvalue_threshold) < 1.0):
+        raise ValueError("--is-pvalue-threshold must be between 0 and 1")
+    if not (0.0 < float(args.oos_pvalue_threshold) < 1.0):
+        raise ValueError("--oos-pvalue-threshold must be between 0 and 1")
 
     _vprint(
         bool(args.verbose),
@@ -813,7 +653,7 @@ def main() -> None:
         events_file_path = Path(args.events_file)
         if not events_file_path.is_absolute():
             events_file_path = PROJECT_ROOT / events_file_path
-        event_slugs_file = _load_event_slugs_from_file(events_file_path)
+        event_slugs_file = load_event_slugs_from_file(events_file_path)
         _vprint(
             bool(args.verbose),
             f"Loaded {len(event_slugs_file)} event slugs from '{events_file_path}'",
@@ -874,8 +714,8 @@ def main() -> None:
     param_config_path = Path(args.param_config)
     if not param_config_path.is_absolute():
         param_config_path = PROJECT_ROOT / param_config_path
-    rules = _load_param_rules(param_config_path)
-    max_possible_trials = _estimate_max_unique_trials(rules, base_params)
+    rules = load_param_rules(param_config_path)
+    max_possible_trials = estimate_max_unique_trials(rules, base_params)
 
     if max_possible_trials is not None and max_possible_trials > 0:
         target_trials = min(args.n_trials, max_possible_trials)
@@ -914,18 +754,18 @@ def main() -> None:
     best_trades_path = out_dir / "best_trades.csv"
 
     top_n = max(1, int(args.top_n))
-    writer = _TrialCsvWriter(trials_path)
+    writer = TrialCsvWriter(trials_path)
     rng = np.random.default_rng(args.seed)
 
     _vprint(bool(args.verbose), "Beginning Monte Carlo trial execution")
     try:
-        n_trials_effective, best_score, best_params, interrupted, top_rows = _run_trials_with_interrupt_handling(
+        n_trials_effective, best_score, best_params, interrupted, top_rows, acceptance_stats = _run_trials_with_interrupt_handling(
             target_trials=target_trials,
             rules=rules,
             base_params=base_params,
             event_data=event_data,
-            in_sample_event_slugs=set(in_sample_event_slugs),
-            out_of_sample_event_slugs=set(out_of_sample_event_slugs),
+            in_sample_event_slugs=list(in_sample_event_slugs),
+            out_of_sample_event_slugs=list(out_of_sample_event_slugs),
             rng=rng,
             objective=args.objective,
             rebalance_freq=int(args.rebalance_freq),
@@ -933,6 +773,8 @@ def main() -> None:
             verbose=bool(args.verbose),
             trial_writer=writer,
             top_n=top_n,
+            is_pvalue_threshold=float(args.is_pvalue_threshold),
+            oos_pvalue_threshold=float(args.oos_pvalue_threshold),
         )
     finally:
         writer.close()
@@ -1064,6 +906,11 @@ def main() -> None:
         "resample_rule": resample_rule or "native",
         "best_score": float(best_score),
         "best_params": best_params,
+        "selection_gates": {
+            "in_sample_pvalue_threshold": float(args.is_pvalue_threshold),
+            "out_of_sample_pvalue_threshold": float(args.oos_pvalue_threshold),
+        },
+        "acceptance_stats": acceptance_stats,
         "partition": partition_payload,
         "search_rules": rules,
     }
@@ -1078,6 +925,11 @@ def main() -> None:
         "n_best_trades": int(best_trades_rows),
         "best_rerun": bool(args.best_rerun),
         "skip_best_rerun": bool(not args.best_rerun),
+        "selection_gates": {
+            "in_sample_pvalue_threshold": float(args.is_pvalue_threshold),
+            "out_of_sample_pvalue_threshold": float(args.oos_pvalue_threshold),
+        },
+        "acceptance_stats": acceptance_stats,
         "output_dir": str(out_dir),
         "trials_file": trials_path.name,
         "top_trials_file": top_path.name,
@@ -1100,6 +952,11 @@ def main() -> None:
         print(f"Max unique trials from step grid: {max_possible_trials}")
     if not args.best_rerun:
         print("Skipped final best-params rerun (faster completion; no regenerated best trades).")
+    print(
+        "Acceptance gates: "
+        f"IS p<{args.is_pvalue_threshold:.4f}, OOS walk-forward p<{args.oos_pvalue_threshold:.4f}"
+    )
+    print(f"Accepted trials: {acceptance_stats['accepted_trials']} / {n_trials_effective}")
     print(f"Best score: {best_score:.6f}")
     print(f"Best params: {best_params}")
     print(f"Total runtime: {_format_elapsed(elapsed_seconds)}")

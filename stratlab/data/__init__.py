@@ -18,6 +18,7 @@ from .dbnomics import (
     save_dbnomics,
     load_dbnomics,
 )
+from .dtype_utils import to_float32_frame
 
 
 def download_universe(
