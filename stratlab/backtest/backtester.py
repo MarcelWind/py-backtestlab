@@ -73,6 +73,7 @@ class Backtester:
             dates = []
 
             current_weights = np.zeros(len(assets))
+            returns_arr = returns.to_numpy()  # materialise once; avoids pandas overhead per bar
 
             for i in range(lookback, n_days):
                 # Rebalance check
@@ -82,7 +83,7 @@ class Backtester:
                     current_weights = self.strategy.generate_weights(prices, returns, i)
 
                 # Calculate portfolio return for this day
-                day_returns = returns.iloc[i].to_numpy()
+                day_returns = returns_arr[i]
                 port_return = float(np.dot(current_weights, day_returns))
 
                 portfolio_returns.append(port_return)

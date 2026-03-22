@@ -56,6 +56,9 @@ class EventBundle(TypedDict):
     open_: pd.DataFrame | None
     buy_volume: pd.DataFrame | None
     sell_volume: pd.DataFrame | None
+    # Pre-computed indicator state snapshots (name → snapshot dict).
+    # Populated after load by _precompute_indicator_snapshots(); None until then.
+    indicator_snapshots: "dict[str, dict] | None"
 
 
 _MC_WORKER_EVENT_DATA: dict[str, EventBundle] | None = None
@@ -101,6 +104,7 @@ def _mc_evaluate_event(payload: tuple[str, dict[str, Any]]) -> tuple[str, float,
         strategy_kwargs=strategy_kwargs,
         rebalance_freq=_MC_WORKER_REBALANCE_FREQ,
         collect_trades=False,
+        indicator_snapshots=bundle.get("indicator_snapshots"),
     )
     raw_obj = float(metrics.get(_MC_WORKER_OBJECTIVE, 0.0))
     signed_obj = _metric_direction(_MC_WORKER_OBJECTIVE) * raw_obj
@@ -460,6 +464,7 @@ def _run_trials_with_interrupt_handling(
                         strategy_kwargs=strategy_kwargs,
                         rebalance_freq=rebalance_freq,
                         collect_trades=False,
+                        indicator_snapshots=bundle.get("indicator_snapshots"),
                     )
                     raw_obj = float(metrics.get(objective, 0.0))
                     signed_obj = objective_sign * raw_obj
@@ -529,11 +534,17 @@ def _run_single_backtest(
     strategy_kwargs: dict[str, Any],
     rebalance_freq: int,
     collect_trades: bool = True,
+    indicator_snapshots: "dict[str, dict] | None" = None,
 ) -> tuple[dict[str, float], pd.DataFrame]:
     strategy_kwargs = dict(strategy_kwargs)
     strategy_kwargs.setdefault("track_delta_history", False)
     strategy = WeatherMarketImbalanceStrategy(**strategy_kwargs)
     setattr(strategy, "record_indicator_history", False)
+    if indicator_snapshots:
+        for ind in strategy.indicator_defs:
+            snap = indicator_snapshots.get(ind.name)
+            if snap is not None:
+                ind.restore(snap)
     result = Backtester(strategy=strategy, rebalance_freq=rebalance_freq).run(
         prices,
         precomputed_returns=returns,
@@ -574,6 +585,43 @@ class _TrialCsvWriter:
         self._f.flush()
 
 
+def _precompute_indicator_snapshots(
+    bundle: "EventBundle",
+    base_params: dict[str, object],
+    rebalance_freq: int,
+) -> dict[str, dict]:
+    """Run one full backtest to warm up SdBands/Vwap, then snapshot their state.
+
+    Because SdBands and Vwap depend only on market data (not sampled parameters),
+    the same snapshot can be restored into every Monte Carlo trial for this event,
+    eliminating the per-trial catch-up loop over all bars.
+    """
+    strategy_kwargs: dict[str, Any] = dict(base_params)
+    strategy_kwargs["vwap"] = bundle["vwap"]
+    strategy_kwargs["volume"] = bundle["volume"]
+    strategy_kwargs["high"] = bundle["high"]
+    strategy_kwargs["low"] = bundle["low"]
+    strategy_kwargs["open_"] = bundle["open_"]
+    strategy_kwargs["buy_volume"] = bundle["buy_volume"]
+    strategy_kwargs["sell_volume"] = bundle["sell_volume"]
+    strategy_kwargs.setdefault("track_delta_history", False)
+
+    strategy = WeatherMarketImbalanceStrategy(**strategy_kwargs)
+    setattr(strategy, "record_indicator_history", False)
+    Backtester(strategy=strategy, rebalance_freq=rebalance_freq).run(
+        bundle["prices"],
+        precomputed_returns=bundle["returns"],
+        include_returns=False,
+        include_weights=False,
+        include_indicator_signals=False,
+    )
+    return {
+        ind.name: ind.snapshot()
+        for ind in strategy.indicator_defs
+        if hasattr(ind, "snapshot")
+    }
+
+
 def _load_event_bundle(
     event_slug: str,
     resample_rule: str | None,
@@ -605,6 +653,7 @@ def _load_event_bundle(
         "open_": open_,
         "buy_volume": buy_volume_full,
         "sell_volume": sell_volume_full,
+        "indicator_snapshots": None,
     }
 
 
@@ -840,6 +889,15 @@ def main() -> None:
             f"(target_trials={target_trials}, max_possible={max_possible_trials}, workers={args.workers})"
         ),
     )
+
+    # Pre-compute SdBands/Vwap state once per event so every trial can restore
+    # from a snapshot instead of re-running the catch-up loop from bar 0.
+    _vprint(bool(args.verbose), "Pre-computing indicator snapshots for each event")
+    for slug, bundle in event_data.items():
+        bundle["indicator_snapshots"] = _precompute_indicator_snapshots(
+            bundle, base_params, int(args.rebalance_freq)
+        )
+    _vprint(bool(args.verbose), f"Indicator snapshots ready for {len(event_data)} event(s)")
 
     timestamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d_%H%M%S")
     event_group = event_slugs[0] if len(event_slugs) == 1 else f"{len(event_slugs)}_events"

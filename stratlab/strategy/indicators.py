@@ -158,11 +158,23 @@ class Indicator(ABC):
 # ---------------------------------------------------------------------------
 
 def _polyfit_slope(x: np.ndarray, y: np.ndarray) -> float:
-    """Return OLS slope from np.polyfit, or 0.0 on degenerate input."""
+    """Return OLS slope, or 0.0 on degenerate input.
+
+    Uses the closed-form degree-1 OLS formula (two dot products) instead of
+    np.polyfit's QR decomposition, giving O(n) vs O(n²) complexity.
+    """
     if len(x) < 2:
         return 0.0
+    n = len(x)
     x_rel = x - x[0]
-    return float(np.polyfit(x_rel, y, 1)[0])
+    sx = float(x_rel.sum())
+    sy = float(y.sum())
+    sxy = float(np.dot(x_rel, y))
+    sxx = float(np.dot(x_rel, x_rel))
+    denom = n * sxx - sx * sx
+    if denom == 0.0:
+        return 0.0
+    return (n * sxy - sx * sy) / denom
 
 
 def _lookback_window_start(
@@ -391,47 +403,54 @@ class Vwap(Indicator):
 
     def _process_bar(self, prices: pd.DataFrame, i: int) -> None:
         ts = prices.index[i]
-        for asset in prices.columns:
+        assets = prices.columns
+        # Extract rows as numpy arrays once — avoids per-asset pandas overhead
+        close_row = prices.values[i]
+        vol_row = self._volume.values[i] if not self._volume.empty else None
+        high_row = self._high.values[i] if self._high is not None and not self._high.empty else None
+        low_row = self._low.values[i] if self._low is not None and not self._low.empty else None
+        open_row = self._open.values[i] if self._open is not None and not self._open.empty else None
+
+        for j, asset in enumerate(assets):
             try:
-                close = float(prices.iloc[i][asset])
+                close = float(close_row[j])
             except (TypeError, ValueError):
                 continue
             if not np.isfinite(close):
                 continue
-            if asset not in self._volume.columns:
+            if vol_row is None:
                 continue
-            
-            # Extract OHLC for pricing method
-            high = None
-            low = None
-            open_ = None
-            if self._high is not None and asset in self._high.columns:
+
+            # Extract OHLC scalars from pre-fetched rows
+            high: float | None = None
+            low: float | None = None
+            open_: float | None = None
+            if high_row is not None:
                 try:
-                    h = float(self._high.iloc[i][asset])
+                    h = float(high_row[j])
                     if np.isfinite(h):
                         high = h
                 except (TypeError, ValueError):
                     pass
-            if self._low is not None and asset in self._low.columns:
+            if low_row is not None:
                 try:
-                    l = float(self._low.iloc[i][asset])
+                    l = float(low_row[j])
                     if np.isfinite(l):
                         low = l
                 except (TypeError, ValueError):
                     pass
-            if self._open is not None and asset in self._open.columns:
+            if open_row is not None:
                 try:
-                    o = float(self._open.iloc[i][asset])
+                    o = float(open_row[j])
                     if np.isfinite(o):
                         open_ = o
                 except (TypeError, ValueError):
                     pass
-            
-            # Compute price based on method
+
             p = _compute_price(close, high, low, open_, self.pricing_method)
-            
+
             try:
-                v = float(self._volume.iloc[i][asset])
+                v = float(vol_row[j])
             except (TypeError, ValueError):
                 v = 0.0
             if not np.isfinite(v):
@@ -472,9 +491,38 @@ class Vwap(Indicator):
             self._next_bar = 0
         for i in range(self._next_bar, index + 1):
             self._process_bar(prices, i)
-        self._next_bar = index + 1
+        self._next_bar = max(self._next_bar, index + 1)
         result = {a: self._values[a][-1] for a in prices.columns if a in self._values}
         return pd.Series(result, dtype=float)
+
+    def snapshot(self) -> dict:
+        """Return a shallow-copy snapshot of all accumulated state.
+
+        Used by the Monte Carlo runner to pre-compute indicator state once per
+        event and restore it into each trial, avoiding repeated catch-up loops.
+        """
+        def _copy_acc(acc: dict) -> dict:
+            # Values are either float (expanding) or list (rolling) per asset.
+            return {a: list(v) if isinstance(v, list) else v for a, v in acc.items()}
+
+        return {
+            "_values": {a: list(v) for a, v in self._values.items()},
+            "_ts_lists": {a: list(v) for a, v in self._ts_lists.items()},
+            "_pv_acc": _copy_acc(self._pv_acc),
+            "_v_acc": _copy_acc(self._v_acc),
+            "_next_bar": self._next_bar,
+        }
+
+    def restore(self, snap: dict) -> None:
+        """Restore accumulated state from a snapshot produced by :meth:`snapshot`."""
+        def _copy_acc(acc: dict) -> dict:
+            return {a: list(v) if isinstance(v, list) else v for a, v in acc.items()}
+
+        self._values = {a: list(v) for a, v in snap["_values"].items()}
+        self._ts_lists = {a: list(v) for a, v in snap["_ts_lists"].items()}
+        self._pv_acc = _copy_acc(snap["_pv_acc"])
+        self._v_acc = _copy_acc(snap["_v_acc"])
+        self._next_bar = snap["_next_bar"]
 
     def vwap_slice(self, asset: str, from_ts, to_ts) -> "pd.Series | None":
         """Return VWAP history for *asset* between *from_ts* and *to_ts* inclusive.
@@ -977,43 +1025,49 @@ class SdBands(Indicator):
 
     def _process_bar(self, prices: pd.DataFrame, i: int) -> None:
         ts = prices.index[i]
-        for asset in prices.columns:
+        assets = prices.columns
+        # Extract rows as numpy arrays once — avoids per-asset pandas overhead
+        close_row = prices.values[i]
+        high_row = self._high.values[i] if self._high is not None and not self._high.empty else None
+        low_row = self._low.values[i] if self._low is not None and not self._low.empty else None
+        open_row = self._open.values[i] if self._open is not None and not self._open.empty else None
+
+        for j, asset in enumerate(assets):
             try:
-                close = float(prices.iloc[i][asset])
+                close = float(close_row[j])
             except (TypeError, ValueError):
                 continue
             if not np.isfinite(close):
                 continue
-            
-            # Extract OHLC for pricing method
-            high = None
-            low = None
-            open_ = None
-            if self._high is not None and asset in self._high.columns:
+
+            # Extract OHLC scalars from pre-fetched rows
+            high: float | None = None
+            low: float | None = None
+            open_: float | None = None
+            if high_row is not None:
                 try:
-                    h = float(self._high.iloc[i][asset])
+                    h = float(high_row[j])
                     if np.isfinite(h):
                         high = h
                 except (TypeError, ValueError):
                     pass
-            if self._low is not None and asset in self._low.columns:
+            if low_row is not None:
                 try:
-                    l = float(self._low.iloc[i][asset])
+                    l = float(low_row[j])
                     if np.isfinite(l):
                         low = l
                 except (TypeError, ValueError):
                     pass
-            if self._open is not None and asset in self._open.columns:
+            if open_row is not None:
                 try:
-                    o = float(self._open.iloc[i][asset])
+                    o = float(open_row[j])
                     if np.isfinite(o):
                         open_ = o
                 except (TypeError, ValueError):
                     pass
-            
-            # Compute price based on method
+
             price = _compute_price(close, high, low, open_, self.pricing_method)
-            
+
             self._sums[asset] = self._sums.get(asset, 0.0) + price
             self._sum_sqs[asset] = self._sum_sqs.get(asset, 0.0) + price * price
             self._counts[asset] = self._counts.get(asset, 0) + 1
@@ -1044,9 +1098,33 @@ class SdBands(Indicator):
             self._next_bar = 0
         for i in range(self._next_bar, index + 1):
             self._process_bar(prices, i)
-        self._next_bar = index + 1
+        self._next_bar = max(self._next_bar, index + 1)
         result = {a: self._history[a][-1][1] for a in prices.columns if a in self._history}
         return pd.DataFrame(result)
+
+    def snapshot(self) -> dict:
+        """Return a shallow-copy snapshot of all accumulated state.
+
+        Used by the Monte Carlo runner to pre-compute indicator state once per
+        event and restore it into each trial, avoiding repeated catch-up loops.
+        """
+        return {
+            "_sums": dict(self._sums),
+            "_sum_sqs": dict(self._sum_sqs),
+            "_counts": dict(self._counts),
+            "_history": {a: list(v) for a, v in self._history.items()},
+            "_ts_lists": {a: list(v) for a, v in self._ts_lists.items()},
+            "_next_bar": self._next_bar,
+        }
+
+    def restore(self, snap: dict) -> None:
+        """Restore accumulated state from a snapshot produced by :meth:`snapshot`."""
+        self._sums = dict(snap["_sums"])
+        self._sum_sqs = dict(snap["_sum_sqs"])
+        self._counts = dict(snap["_counts"])
+        self._history = {a: list(v) for a, v in snap["_history"].items()}
+        self._ts_lists = {a: list(v) for a, v in snap["_ts_lists"].items()}
+        self._next_bar = snap["_next_bar"]
 
     def band_slice(self, asset: str, from_ts, to_ts) -> "pd.DataFrame | None":
         """Return band history for *asset* between *from_ts* and *to_ts* inclusive.
@@ -1180,9 +1258,29 @@ class VwapBands(Indicator):
             # Get VWAP values for this bar from the referenced indicator
             vwap_result = self._vwap_indicator.compute(prices, returns, i)
             self._process_bar(prices, i, vwap_result)
-        self._next_bar = index + 1
+        self._next_bar = max(self._next_bar, index + 1)
         result = {a: self._history[a][-1][1] for a in prices.columns if a in self._history}
         return pd.DataFrame(result)
+
+    def snapshot(self) -> dict:
+        """Return a shallow-copy snapshot of all accumulated state."""
+        return {
+            "_sums": dict(self._sums),
+            "_sum_sqs": dict(self._sum_sqs),
+            "_counts": dict(self._counts),
+            "_history": {a: list(v) for a, v in self._history.items()},
+            "_ts_lists": {a: list(v) for a, v in self._ts_lists.items()},
+            "_next_bar": self._next_bar,
+        }
+
+    def restore(self, snap: dict) -> None:
+        """Restore accumulated state from a snapshot produced by :meth:`snapshot`."""
+        self._sums = dict(snap["_sums"])
+        self._sum_sqs = dict(snap["_sum_sqs"])
+        self._counts = dict(snap["_counts"])
+        self._history = {a: list(v) for a, v in snap["_history"].items()}
+        self._ts_lists = {a: list(v) for a, v in snap["_ts_lists"].items()}
+        self._next_bar = snap["_next_bar"]
 
     def band_slice(self, asset: str, from_ts, to_ts) -> "pd.DataFrame | None":
         """Return band history for *asset* between *from_ts* and *to_ts* inclusive.
