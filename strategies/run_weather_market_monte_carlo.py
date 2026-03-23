@@ -19,6 +19,7 @@ import argparse
 import concurrent.futures
 import gc
 import json
+import platform
 import sys
 import time
 from pathlib import Path
@@ -37,6 +38,14 @@ from stratlab.config import RESULTS_DIR
 from stratlab.data.dtype_utils import to_float32_frame
 from stratlab.io.csv_writer import TrialCsvWriter
 from stratlab.io.events import load_event_slugs_from_file
+from stratlab.io.indicator_cache import (
+    build_cache_key_material,
+    clear_cache,
+    compute_file_fingerprint,
+    hash_payload,
+    load_indicator_snapshots,
+    save_indicator_snapshots,
+)
 from stratlab.optimize.rule_search import estimate_max_unique_trials, load_param_rules, params_key, sample_trial_params
 from stratlab.validation.partition import EventPartition, split_events_in_sample_out_of_sample
 from stratlab.validation.significance import empirical_one_tailed_pvalue, walk_forward_pvalue_from_event_order
@@ -45,6 +54,7 @@ from strategies.weather_market_strategy import WeatherMarketImbalanceStrategy
 
 _PARAM_CONFIG_PATH = Path(__file__).with_name("weather_market_monte_carlo_params.json")
 _EMPTY_TRADES_DF = pd.DataFrame()
+_DEFAULT_PRECOMPUTE_CACHE_DIR = RESULTS_DIR / "indicator_cache" / "weather_imbalance_mc"
 
 
 class EventBundle(TypedDict):
@@ -142,6 +152,60 @@ def _format_elapsed(seconds: float) -> str:
     hours, rem = divmod(total_seconds, 3600)
     minutes, secs = divmod(rem, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _resolve_indicator_names_for_bundle(
+    bundle: EventBundle,
+    base_params: dict[str, object],
+) -> list[str]:
+    """Build strategy once to capture enabled indicator set for cache keying."""
+    strategy_kwargs: dict[str, Any] = dict(base_params)
+    strategy_kwargs["vwap"] = bundle["vwap"]
+    strategy_kwargs["volume"] = bundle["volume"]
+    strategy_kwargs["high"] = bundle["high"]
+    strategy_kwargs["low"] = bundle["low"]
+    strategy_kwargs["open_"] = bundle["open_"]
+    strategy_kwargs["buy_volume"] = bundle["buy_volume"]
+    strategy_kwargs["sell_volume"] = bundle["sell_volume"]
+    strategy_kwargs.setdefault("track_delta_history", False)
+    strategy = WeatherMarketImbalanceStrategy(**strategy_kwargs)
+    return sorted(str(ind.name) for ind in strategy.indicator_defs)
+
+
+def _event_source_fingerprint(bundle: EventBundle) -> str:
+    """Create a lightweight deterministic fingerprint of loaded event matrices."""
+
+    def _frame_sig(name: str, df: pd.DataFrame | None) -> dict[str, Any]:
+        if df is None:
+            return {"name": name, "missing": True}
+        n_rows = int(len(df.index))
+        n_cols = int(len(df.columns))
+        first_ts = str(df.index[0]) if n_rows > 0 else ""
+        last_ts = str(df.index[-1]) if n_rows > 0 else ""
+        first_col = str(df.columns[0]) if n_cols > 0 else ""
+        last_col = str(df.columns[-1]) if n_cols > 0 else ""
+        return {
+            "name": name,
+            "rows": n_rows,
+            "cols": n_cols,
+            "first_ts": first_ts,
+            "last_ts": last_ts,
+            "first_col": first_col,
+            "last_col": last_col,
+        }
+
+    payload = [
+        _frame_sig("prices", bundle.get("prices")),
+        _frame_sig("returns", bundle.get("returns")),
+        _frame_sig("vwap", bundle.get("vwap")),
+        _frame_sig("volume", bundle.get("volume")),
+        _frame_sig("high", bundle.get("high")),
+        _frame_sig("low", bundle.get("low")),
+        _frame_sig("open_", bundle.get("open_")),
+        _frame_sig("buy_volume", bundle.get("buy_volume")),
+        _frame_sig("sell_volume", bundle.get("sell_volume")),
+    ]
+    return hash_payload(payload)
 
 
 def _run_trials_with_interrupt_handling(
@@ -413,8 +477,10 @@ def _precompute_indicator_snapshots(
     bundle: "EventBundle",
     base_params: dict[str, object],
     rebalance_freq: int,
+    verbose: bool = False,
+    event_slug: str | None = None,
 ) -> dict[str, dict]:
-    """Run one full backtest to warm up SdBands/Vwap, then snapshot their state.
+    """Warm snapshot-capable indicators and return their state snapshots.
 
     Because SdBands and Vwap depend only on market data (not sampled parameters),
     the same snapshot can be restored into every Monte Carlo trial for this event,
@@ -432,17 +498,41 @@ def _precompute_indicator_snapshots(
 
     strategy = WeatherMarketImbalanceStrategy(**strategy_kwargs)
     setattr(strategy, "record_indicator_history", False)
-    Backtester(strategy=strategy, rebalance_freq=rebalance_freq).run(
-        bundle["prices"],
-        precomputed_returns=bundle["returns"],
-        include_returns=False,
-        include_weights=False,
-        include_indicator_signals=False,
-    )
+
+    # Avoid full strategy/backtester execution here. We only need indicator
+    # internal state for indicators that support snapshot/restore.
+    snapshot_inds = [ind for ind in strategy.indicator_defs if hasattr(ind, "snapshot")]
+    if not snapshot_inds:
+        return {}
+
+    prices = bundle["prices"]
+    returns = bundle["returns"]
+    n_bars = len(prices)
+    if n_bars <= 0:
+        return {}
+
+    step = max(1, int(rebalance_freq))
+    last_idx = n_bars - 1
+    processed = 0
+    for i in range(0, n_bars, step):
+        for ind in snapshot_inds:
+            cast(Any, ind).compute(prices, returns, i)
+        processed += 1
+        if verbose and processed % 1000 == 0:
+            slug = event_slug or "event"
+            print(
+                f"[precompute] '{slug}' warmed {processed} rebalance bars",
+                flush=True,
+            )
+
+    # Ensure final bar is included even when rebalance_freq > 1.
+    if last_idx % step != 0:
+        for ind in snapshot_inds:
+            cast(Any, ind).compute(prices, returns, last_idx)
+
     return {
         ind.name: cast(Any, ind).snapshot()
-        for ind in strategy.indicator_defs
-        if hasattr(ind, "snapshot")
+        for ind in snapshot_inds
     }
 
 
@@ -620,6 +710,34 @@ def main() -> None:
         default=0.05,
         help="Accept trial only if OOS walk-forward empirical p-value is below this threshold.",
     )
+    parser.add_argument(
+        "--precompute-indicators",
+        action="store_true",
+        help=(
+            "Precompute and snapshot indicator state before Monte Carlo trials. "
+            "This can be memory intensive for many events and is disabled by default."
+        ),
+    )
+    parser.add_argument(
+        "--precompute-cache-mode",
+        choices=["off", "read", "write", "read-write"],
+        default="read-write",
+        help=(
+            "Disk cache mode for indicator snapshots used by --precompute-indicators: "
+            "off/read/write/read-write."
+        ),
+    )
+    parser.add_argument(
+        "--precompute-cache-dir",
+        type=str,
+        default=str(_DEFAULT_PRECOMPUTE_CACHE_DIR),
+        help="Directory for persistent indicator snapshot cache files.",
+    )
+    parser.add_argument(
+        "--clear-precompute-cache",
+        action="store_true",
+        help="Clear indicator snapshot cache directory before this run.",
+    )
     args = parser.parse_args()
 
     if args.n_trials <= 0:
@@ -730,14 +848,113 @@ def main() -> None:
         ),
     )
 
-    # Pre-compute SdBands/Vwap state once per event so every trial can restore
-    # from a snapshot instead of re-running the catch-up loop from bar 0.
-    _vprint(bool(args.verbose), "Pre-computing indicator snapshots for each event")
-    for slug, bundle in event_data.items():
-        bundle["indicator_snapshots"] = _precompute_indicator_snapshots(
-            bundle, base_params, int(args.rebalance_freq)
+    cache_dir = Path(args.precompute_cache_dir)
+    if not cache_dir.is_absolute():
+        cache_dir = PROJECT_ROOT / cache_dir
+    cache_mode = str(args.precompute_cache_mode)
+    cache_read_enabled = cache_mode in {"read", "read-write"}
+    cache_write_enabled = cache_mode in {"write", "read-write"}
+    if bool(args.clear_precompute_cache):
+        clear_cache(cache_dir)
+        _vprint(bool(args.verbose), f"Cleared precompute cache at '{cache_dir}'")
+
+    # Snapshot precompute is optional because storing full indicator history for
+    # many events can consume large amounts of memory (and can be multiplied by
+    # worker processes when multiprocessing is enabled).
+    precompute_enabled = bool(args.precompute_indicators)
+    if precompute_enabled and int(args.workers) > 1:
+        print(
+            "Disabling --precompute-indicators because --workers > 1 would "
+            "replicate large snapshots across worker processes."
         )
-    _vprint(bool(args.verbose), f"Indicator snapshots ready for {len(event_data)} event(s)")
+        precompute_enabled = False
+    if precompute_enabled and len(event_data) > 24:
+        print(
+            "Disabling --precompute-indicators for this run because the event "
+            f"count is high ({len(event_data)}). Use fewer events to precompute safely."
+        )
+        precompute_enabled = False
+
+    if precompute_enabled:
+        indicator_names: list[str] = []
+        indicator_names_hash = ""
+        base_params_hash = hash_payload(base_params)
+        indicators_code_fingerprint = compute_file_fingerprint(
+            PROJECT_ROOT / "stratlab" / "strategy" / "indicators.py"
+        )
+        if event_data:
+            indicator_names = _resolve_indicator_names_for_bundle(next(iter(event_data.values())), base_params)
+            indicator_names_hash = hash_payload(indicator_names)
+
+        cache_hits = 0
+        cache_writes = 0
+        cache_misses = 0
+        _vprint(bool(args.verbose), "Pre-computing indicator snapshots for each event")
+        for idx, (slug, bundle) in enumerate(event_data.items(), start=1):
+            key_material = build_cache_key_material(
+                event_slug=slug,
+                resample_rule=resample_rule or "native",
+                prefer_outcome=str(args.prefer_outcome),
+                rebalance_freq=int(args.rebalance_freq),
+                profile=str(args.profile),
+                base_params_hash=base_params_hash,
+                indicator_names_hash=indicator_names_hash,
+                indicator_code_fingerprint=indicators_code_fingerprint,
+                source_data_fingerprint=_event_source_fingerprint(bundle),
+            )
+            cache_key = hash_payload(key_material)
+
+            if cache_read_enabled:
+                cached_snapshots = load_indicator_snapshots(
+                    cache_dir=cache_dir,
+                    event_slug=slug,
+                    cache_key=cache_key,
+                )
+                if cached_snapshots is not None:
+                    bundle["indicator_snapshots"] = cached_snapshots
+                    cache_hits += 1
+                    _vprint(
+                        bool(args.verbose),
+                        f"[precompute {idx}/{len(event_data)}] Cache hit for '{slug}'",
+                    )
+                    continue
+
+            cache_misses += 1
+            _vprint(
+                bool(args.verbose),
+                f"[precompute {idx}/{len(event_data)}] Building snapshot for '{slug}'",
+            )
+            bundle["indicator_snapshots"] = _precompute_indicator_snapshots(
+                bundle,
+                base_params,
+                int(args.rebalance_freq),
+                verbose=bool(args.verbose),
+                event_slug=slug,
+            )
+            if cache_write_enabled and bundle["indicator_snapshots"] is not None:
+                save_indicator_snapshots(
+                    cache_dir=cache_dir,
+                    event_slug=slug,
+                    cache_key=cache_key,
+                    meta={
+                        **key_material,
+                        "python_version": platform.python_version(),
+                        "indicator_names": indicator_names,
+                    },
+                    snapshots=bundle["indicator_snapshots"],
+                )
+                cache_writes += 1
+        _vprint(bool(args.verbose), f"Indicator snapshots ready for {len(event_data)} event(s)")
+        _vprint(
+            bool(args.verbose),
+            (
+                "Indicator cache summary: "
+                f"hits={cache_hits}, misses={cache_misses}, writes={cache_writes}, "
+                f"mode={cache_mode}, dir={cache_dir}"
+            ),
+        )
+    else:
+        _vprint(bool(args.verbose), "Skipping indicator snapshot precompute")
 
     timestamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d_%H%M%S")
     event_group = event_slugs[0] if len(event_slugs) == 1 else f"{len(event_slugs)}_events"

@@ -489,6 +489,14 @@ class Vwap(Indicator):
         """
         if self._next_bar < 0:
             self._next_bar = 0
+        if self._next_bar > index:
+            # Snapshot replay path: history is already populated past `index`.
+            result = {
+                a: self._values[a][index]
+                for a in prices.columns
+                if a in self._values and index < len(self._values[a])
+            }
+            return pd.Series(result, dtype=float)
         for i in range(self._next_bar, index + 1):
             self._process_bar(prices, i)
         self._next_bar = max(self._next_bar, index + 1)
@@ -686,40 +694,70 @@ class VwapVolumeImbalance(Indicator):
         self.lookback = int(lookback)
         self._indicator_name = name
         self._plot_panel = plot_panel
+        self._next_bar: int = -1
+        # Running cumulative sums so window sums can be obtained in O(1).
+        self._cum_above: dict[str, list[float]] = {}
+        self._cum_below: dict[str, list[float]] = {}
+        self._last_ratio: dict[str, float] = {}
 
     @property
     def name(self) -> str:
         return self._indicator_name
 
-    def _imbalance_for_asset(self, prices: pd.DataFrame, asset: str, index: int) -> float:
-        if asset not in self._volume.columns or asset not in prices.columns:
-            return float("nan")
+    def _process_bar(self, prices: pd.DataFrame, i: int) -> None:
+        ts = prices.index[i]
+        lookback = max(3, self.lookback)
 
-        price_hist = prices.iloc[: index + 1][asset]
-        vol_hist = self._volume.iloc[: index + 1][asset].fillna(0.0)
+        for asset in prices.columns:
+            prev_above = self._cum_above.get(asset, [0.0])[-1] if self._cum_above.get(asset) else 0.0
+            prev_below = self._cum_below.get(asset, [0.0])[-1] if self._cum_below.get(asset) else 0.0
 
-        from_ts = prices.index[0]
-        to_ts = prices.index[index]
-        bands = self.sd_bands.band_slice(asset, from_ts, to_ts)
-        if bands is None or "mean" not in bands.columns:
-            return float("nan")
-        mean_hist = pd.to_numeric(bands["mean"], errors="coerce").reindex(price_hist.index)
+            if asset not in self._volume.columns:
+                self._cum_above.setdefault(asset, []).append(prev_above)
+                self._cum_below.setdefault(asset, []).append(prev_below)
+                self._last_ratio[asset] = float("nan")
+                continue
 
-        valid = mean_hist.notna() & (vol_hist > 0.0)
-        vol_above = vol_hist.where(valid & (price_hist > mean_hist), 0.0)
-        vol_below = vol_hist.where(valid & (price_hist <= mean_hist), 0.0)
+            try:
+                price = float(prices.iloc[i][asset])
+            except Exception:
+                price = float("nan")
+            try:
+                vol = float(self._volume.iloc[i][asset])
+            except Exception:
+                vol = 0.0
+            if not np.isfinite(vol):
+                vol = 0.0
 
-        roll_window = max(3, self.lookback)
-        ra = vol_above.rolling(window=roll_window, min_periods=1).sum()
-        rb = vol_below.rolling(window=roll_window, min_periods=1).sum()
-        total = ra + rb
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ratio = (ra - rb).divide(total.where(total > 0.0)) * 100.0
+            mean_val = self.sd_bands.band_value_at(asset, ts, "mean")
+            above = 0.0
+            below = 0.0
+            if mean_val is not None and np.isfinite(price) and vol > 0.0:
+                if price > float(mean_val):
+                    above = vol
+                else:
+                    below = vol
 
-        try:
-            return float(ratio.iloc[-1])
-        except Exception:
-            return float("nan")
+            cur_above = prev_above + above
+            cur_below = prev_below + below
+            above_hist = self._cum_above.setdefault(asset, [])
+            below_hist = self._cum_below.setdefault(asset, [])
+            above_hist.append(cur_above)
+            below_hist.append(cur_below)
+
+            start_minus_one = i - lookback
+            if start_minus_one >= 0 and start_minus_one < len(above_hist):
+                win_above = cur_above - above_hist[start_minus_one]
+                win_below = cur_below - below_hist[start_minus_one]
+            else:
+                win_above = cur_above
+                win_below = cur_below
+
+            total = win_above + win_below
+            if total > 0.0:
+                self._last_ratio[asset] = float((win_above - win_below) / total * 100.0)
+            else:
+                self._last_ratio[asset] = float("nan")
 
     def compute(
         self,
@@ -727,8 +765,13 @@ class VwapVolumeImbalance(Indicator):
         returns: pd.DataFrame,
         index: int,
     ) -> pd.Series:
+        if self._next_bar < 0:
+            self._next_bar = 0
+        for i in range(self._next_bar, index + 1):
+            self._process_bar(prices, i)
+        self._next_bar = max(self._next_bar, index + 1)
         assets = prices.columns.tolist()
-        values = {a: self._imbalance_for_asset(prices, a, index) for a in assets}
+        values = {a: float(self._last_ratio.get(a, float("nan"))) for a in assets}
         return pd.Series(values, dtype=float)
 
 
@@ -776,6 +819,12 @@ class BandPosition(Indicator):
         self._indicator_name = name
         self._plot_panel = plot_panel
         self.sd_bands = sd_bands
+        self._next_bar: int = -1
+        self._cum_total: dict[str, list[int]] = {}
+        self._cum_above_mean: dict[str, list[int]] = {}
+        self._cum_above_1sd: dict[str, list[int]] = {}
+        self._cum_below_minus_1sd: dict[str, list[int]] = {}
+        self._cum_within_1sd: dict[str, list[int]] = {}
 
     @property
     def name(self) -> str:
@@ -829,30 +878,95 @@ class BandPosition(Indicator):
     def _window_start(self, prices: pd.DataFrame, index: int) -> int:
         return _lookback_window_start(prices, index, self.lookback_hours, self.lookback_bars)
 
+    @staticmethod
+    def _window_count(prefix: list[int], start: int, end: int) -> int:
+        if end < 0 or end >= len(prefix):
+            return 0
+        left = prefix[start - 1] if start > 0 and (start - 1) < len(prefix) else 0
+        return int(prefix[end] - left)
+
+    def _process_bar(self, prices: pd.DataFrame, i: int) -> None:
+        ts = prices.index[i]
+        for asset in prices.columns.tolist():
+            prev_total = self._cum_total.get(asset, [0])[-1] if self._cum_total.get(asset) else 0
+            prev_above_mean = self._cum_above_mean.get(asset, [0])[-1] if self._cum_above_mean.get(asset) else 0
+            prev_above_1sd = self._cum_above_1sd.get(asset, [0])[-1] if self._cum_above_1sd.get(asset) else 0
+            prev_below_1sd = (
+                self._cum_below_minus_1sd.get(asset, [0])[-1]
+                if self._cum_below_minus_1sd.get(asset)
+                else 0
+            )
+            prev_within_1sd = self._cum_within_1sd.get(asset, [0])[-1] if self._cum_within_1sd.get(asset) else 0
+
+            valid = False
+            price_val = float("nan")
+            try:
+                price_val = float(prices.iloc[i][asset])
+                valid = np.isfinite(price_val)
+            except Exception:
+                valid = False
+
+            mean_val = up1_val = dn1_val = None
+            if valid and self.sd_bands is not None:
+                mean_val = self.sd_bands.band_value_at(asset, ts, "mean")
+                up1_val = self.sd_bands.band_value_at(asset, ts, "+1sd")
+                dn1_val = self.sd_bands.band_value_at(asset, ts, "-1sd")
+                valid = (
+                    mean_val is not None
+                    and up1_val is not None
+                    and dn1_val is not None
+                    and np.isfinite(float(mean_val))
+                    and np.isfinite(float(up1_val))
+                    and np.isfinite(float(dn1_val))
+                )
+
+            mean_f = float(mean_val) if valid and mean_val is not None else 0.0
+            up1_f = float(up1_val) if valid and up1_val is not None else 0.0
+            dn1_f = float(dn1_val) if valid and dn1_val is not None else 0.0
+
+            inc_total = 1 if valid else 0
+            inc_above_mean = 1 if valid and price_val > mean_f else 0
+            inc_above_1sd = 1 if valid and price_val > up1_f else 0
+            inc_below_1sd = 1 if valid and price_val < dn1_f else 0
+            inc_within_1sd = 1 if valid and (dn1_f <= price_val <= up1_f) else 0
+
+            self._cum_total.setdefault(asset, []).append(prev_total + inc_total)
+            self._cum_above_mean.setdefault(asset, []).append(prev_above_mean + inc_above_mean)
+            self._cum_above_1sd.setdefault(asset, []).append(prev_above_1sd + inc_above_1sd)
+            self._cum_below_minus_1sd.setdefault(asset, []).append(prev_below_1sd + inc_below_1sd)
+            self._cum_within_1sd.setdefault(asset, []).append(prev_within_1sd + inc_within_1sd)
+
     def compute(
         self,
         prices: pd.DataFrame,
         returns: pd.DataFrame,
         index: int,
     ) -> pd.DataFrame:
+        if self._next_bar < 0:
+            self._next_bar = 0
+        for i in range(self._next_bar, index + 1):
+            self._process_bar(prices, i)
+        self._next_bar = max(self._next_bar, index + 1)
+
         start = self._window_start(prices, index)
         result: dict[str, dict[str, float]] = {}
         for asset in prices.columns.tolist():
-            window_ser = prices.iloc[start: index + 1][asset].dropna()
-            if self.sd_bands is not None and len(window_ser) > 0:
-                bands_df = self.sd_bands.band_slice(
-                    asset, window_ser.index[0], window_ser.index[-1]
-                )
-                if bands_df is not None and len(bands_df) > 0:
-                    aligned = bands_df.reindex(window_ser.index)
-                    result[asset] = self._stats_with_bands(
-                        window_ser.to_numpy(dtype=float),
-                        aligned["mean"].to_numpy(dtype=float),
-                        aligned["+1sd"].to_numpy(dtype=float),
-                        aligned["-1sd"].to_numpy(dtype=float),
-                    )
-                    continue
-            result[asset] = self._stats_for_window(window_ser.to_numpy(dtype=float))
+            total = self._window_count(self._cum_total.get(asset, []), start, index)
+            if total <= 0:
+                result[asset] = {k: 0.0 for k in BandPosition._STATS}
+                continue
+
+            above_mean = self._window_count(self._cum_above_mean.get(asset, []), start, index)
+            above_1sd = self._window_count(self._cum_above_1sd.get(asset, []), start, index)
+            below_1sd = self._window_count(self._cum_below_minus_1sd.get(asset, []), start, index)
+            within_1sd = self._window_count(self._cum_within_1sd.get(asset, []), start, index)
+            denom = float(total)
+            result[asset] = {
+                "above_mean_pct": float(above_mean / denom * 100.0),
+                "above_1sd_pct": float(above_1sd / denom * 100.0),
+                "below_minus_1sd_pct": float(below_1sd / denom * 100.0),
+                "within_1sd_pct": float(within_1sd / denom * 100.0),
+            }
         return pd.DataFrame(result, index=self._STATS)
 
 
@@ -898,6 +1012,10 @@ class MeanReversion(Indicator):
         self.lookback_bars = lookback_bars
         self._indicator_name = name
         self._plot_panel = plot_panel
+        self._cached_len: int = -1
+        self._cached_index: pd.Index | None = None
+        self._pref_valid: dict[str, np.ndarray] = {}
+        self._pref_changes: dict[str, np.ndarray] = {}
 
     @property
     def name(self) -> str:
@@ -915,21 +1033,75 @@ class MeanReversion(Indicator):
         changes = int(np.sum(np.diff(np.sign(valid)) != 0))
         return float(np.clip(changes / (len(valid) - 1), 0.0, 1.0))
 
+    def _ensure_prefix_cache(self, prices: pd.DataFrame) -> None:
+        if self._cached_len == len(prices) and self._cached_index is not None and self._cached_index.equals(prices.index):
+            return
+
+        n = len(prices)
+        self._pref_valid.clear()
+        self._pref_changes.clear()
+        if n <= 0:
+            self._cached_len = n
+            self._cached_index = prices.index
+            return
+
+        for asset in prices.columns.tolist():
+            arr = prices[asset].to_numpy(dtype=float)
+            roll = pd.Series(arr).rolling(window=self.window, min_periods=1).mean().to_numpy(dtype=float)
+            dev = arr - roll
+            valid = np.isfinite(dev)
+
+            signs = np.sign(dev)
+            signs[~valid] = 0.0
+            changes = np.zeros(n, dtype=np.int32)
+            if n > 1:
+                prev_valid = valid[:-1]
+                cur_valid = valid[1:]
+                sign_changed = signs[1:] != signs[:-1]
+                changes[1:] = (prev_valid & cur_valid & sign_changed).astype(np.int32)
+
+            self._pref_valid[asset] = np.cumsum(valid.astype(np.int32))
+            self._pref_changes[asset] = np.cumsum(changes)
+
+        self._cached_len = n
+        self._cached_index = prices.index
+
+    @staticmethod
+    def _range_sum(prefix: np.ndarray, start: int, end: int) -> int:
+        if end < 0 or end >= len(prefix):
+            return 0
+        if start <= 0:
+            return int(prefix[end])
+        return int(prefix[end] - prefix[start - 1])
+
     def compute(
         self,
         prices: pd.DataFrame,
         returns: pd.DataFrame,
         index: int,
     ) -> pd.Series:
+        self._ensure_prefix_cache(prices)
         start = _lookback_window_start(prices, index, self.lookback_hours, self.lookback_bars)
         assets = prices.columns.tolist()
-        scores = {
-            asset: self._score_for_window(
-                prices.iloc[start: index + 1][asset].dropna().to_numpy(dtype=float),
-                self.window,
-            )
-            for asset in assets
-        }
+        scores: dict[str, float] = {}
+        for asset in assets:
+            pref_valid = self._pref_valid.get(asset)
+            pref_changes = self._pref_changes.get(asset)
+            if pref_valid is None or pref_changes is None:
+                scores[asset] = 0.0
+                continue
+
+            valid_n = self._range_sum(pref_valid, start, index)
+            if valid_n <= 1:
+                scores[asset] = 0.0
+                continue
+
+            # change index i corresponds to edge (i-1 -> i), so for window
+            # [start, index] we sum change slots [start+1, index].
+            change_start = min(index, start + 1)
+            changes_n = self._range_sum(pref_changes, change_start, index)
+            scores[asset] = float(np.clip(changes_n / (valid_n - 1), 0.0, 1.0))
+
         return pd.Series(scores, dtype=float)
 
 # ---------------------------------------------------------------------------
@@ -1096,6 +1268,14 @@ class SdBands(Indicator):
         """
         if self._next_bar < 0:
             self._next_bar = 0
+        if self._next_bar > index:
+            # Snapshot replay path: history is already populated past `index`.
+            result = {
+                a: self._history[a][index][1]
+                for a in prices.columns
+                if a in self._history and index < len(self._history[a])
+            }
+            return pd.DataFrame(result)
         for i in range(self._next_bar, index + 1):
             self._process_bar(prices, i)
         self._next_bar = max(self._next_bar, index + 1)
