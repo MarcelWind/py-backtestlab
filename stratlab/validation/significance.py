@@ -19,7 +19,7 @@ def walk_forward_pvalue_from_event_order(
     ordered_oos_slugs: list[str],
     historical_prefix_scores: dict[int, list[float]],
 ) -> float:
-    """Compute conservative OOS walk-forward p-value using ordered event prefixes."""
+    """Compute conservative outsample walk-forward p-value using ordered event prefixes."""
     if not ordered_oos_slugs:
         return 0.0
 

@@ -8,7 +8,7 @@ See the full pipeline design in docs/crypto_portfolio_backtesting_pipeline.md.
 
 - Multi-asset portfolio backtesting and reporting
 - Monte Carlo / random-search parameter optimization (using `optimize`) 
-- Walk-forward / OOS evaluation support
+- Walk-forward / outsample evaluation support
 - Exported metrics and plots saved under `results/`
 
 ## Quickstart (Windows)

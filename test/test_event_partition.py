@@ -1,17 +1,17 @@
-"""Tests for generic IS/OOS event partition helpers."""
+"""Tests for generic insample/outsample event partition helpers."""
 
-from stratlab.validation.partition import compute_is_oos_event_counts, split_events_in_sample_out_of_sample
-
-
-def test_compute_is_oos_event_counts_rounding() -> None:
-    is_count, oos_count = compute_is_oos_event_counts(5, out_of_sample_ratio=0.4)
-    assert is_count == 3
-    assert oos_count == 2
+from stratlab.validation.partition import compute_insample_outsample_event_counts, split_events_in_sample_out_of_sample
 
 
-def test_compute_is_oos_event_counts_single_event_raises() -> None:
+def test_compute_insample_outsample_event_counts_rounding() -> None:
+    insample_count, outsample_count = compute_insample_outsample_event_counts(5, out_of_sample_ratio=0.4)
+    assert insample_count == 3
+    assert outsample_count == 2
+
+
+def test_compute_insample_outsample_event_counts_single_event_raises() -> None:
     try:
-        compute_is_oos_event_counts(1, out_of_sample_ratio=0.4)
+        compute_insample_outsample_event_counts(1, out_of_sample_ratio=0.4)
         raise AssertionError("Expected ValueError for n_events < 2")
     except ValueError as exc:
         assert "at least 2 events" in str(exc)

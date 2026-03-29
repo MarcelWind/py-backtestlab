@@ -222,8 +222,8 @@ def _run_trials_with_interrupt_handling(
     verbose: bool,
     trial_writer: "TrialCsvWriter",
     top_n: int,
-    is_pvalue_threshold: float,
-    oos_pvalue_threshold: float,
+    insample_pvalue_threshold: float,
+    outsample_pvalue_threshold: float,
 ) -> tuple[int, float, dict[str, Any] | None, bool, list[dict[str, Any]], dict[str, int]]:
     """Run Monte Carlo trials and return partial results if interrupted."""
     seen: set[tuple[tuple[str, Any], ...]] = set()
@@ -242,8 +242,8 @@ def _run_trials_with_interrupt_handling(
     historical_in_sample_scores: list[float] = []
     historical_oos_prefix_scores: dict[int, list[float]] = {}
     accepted_trials = 0
-    rejected_trials_is = 0
-    rejected_trials_oos = 0
+    rejected_trials_insample = 0
+    rejected_trials_outsample = 0
 
     # Constraints to avoid sampling settings that exceed available history.
     def _constraints(params: dict[str, Any], prices_df: pd.DataFrame) -> bool:
@@ -369,19 +369,19 @@ def _run_trials_with_interrupt_handling(
             row["_event_count_in_sample"] = len(per_event_scores_in_sample)
             row["_event_count_out_of_sample"] = len(per_event_scores_out_of_sample)
 
-            is_pvalue = empirical_one_tailed_pvalue(agg_score, historical_in_sample_scores)
-            oos_pvalue = walk_forward_pvalue_from_event_order(
+            insample_pvalue = empirical_one_tailed_pvalue(agg_score, historical_in_sample_scores)
+            outsample_pvalue = walk_forward_pvalue_from_event_order(
                 event_scores=per_event_scores_out_of_sample,
                 ordered_oos_slugs=out_of_sample_event_slugs,
                 historical_prefix_scores=historical_oos_prefix_scores,
             )
-            is_gate_pass = bool(is_pvalue < float(is_pvalue_threshold))
-            oos_gate_pass = bool((not out_of_sample_event_slugs) or (oos_pvalue < float(oos_pvalue_threshold)))
-            accepted = bool(is_gate_pass and oos_gate_pass)
-            row["_pvalue_in_sample"] = is_pvalue
-            row["_pvalue_out_of_sample_walk_forward"] = oos_pvalue
-            row["_gate_in_sample_pass"] = is_gate_pass
-            row["_gate_out_of_sample_pass"] = oos_gate_pass
+            insample_gate_pass = bool(insample_pvalue < float(insample_pvalue_threshold))
+            outsample_gate_pass = bool((not out_of_sample_event_slugs) or (outsample_pvalue < float(outsample_pvalue_threshold)))
+            accepted = bool(insample_gate_pass and outsample_gate_pass)
+            row["_pvalue_in_sample"] = insample_pvalue
+            row["_pvalue_out_of_sample_walk_forward"] = outsample_pvalue
+            row["_gate_in_sample_pass"] = insample_gate_pass
+            row["_gate_out_of_sample_pass"] = outsample_gate_pass
             row["_accepted"] = accepted
 
             # Stream each trial row to disk immediately to avoid holding the full
@@ -392,10 +392,10 @@ def _run_trials_with_interrupt_handling(
             if accepted:
                 accepted_trials += 1
             else:
-                if not is_gate_pass:
-                    rejected_trials_is += 1
-                if not oos_gate_pass:
-                    rejected_trials_oos += 1
+                if not insample_gate_pass:
+                    rejected_trials_insample += 1
+                if not outsample_gate_pass:
+                    rejected_trials_outsample += 1
 
             if np.isfinite(agg_score):
                 historical_in_sample_scores.append(float(agg_score))
@@ -436,8 +436,8 @@ def _run_trials_with_interrupt_handling(
 
     acceptance_stats = {
         "accepted_trials": int(accepted_trials),
-        "rejected_trials_in_sample_gate": int(rejected_trials_is),
-        "rejected_trials_out_of_sample_gate": int(rejected_trials_oos),
+        "rejected_trials_in_sample_gate": int(rejected_trials_insample),
+        "rejected_trials_out_of_sample_gate": int(rejected_trials_outsample),
     }
     return rows_written, best_score, best_params, interrupted, top_rows, acceptance_stats
 
@@ -639,7 +639,7 @@ def main() -> None:
         "--partition-seed",
         type=int,
         default=None,
-        help="Seed for deterministic IS/OOS event split. Defaults to --seed.",
+        help="Seed for deterministic insample/outsample event split. Defaults to --seed.",
     )
     parser.add_argument(
         "--out-of-sample-ratio",
@@ -648,9 +648,9 @@ def main() -> None:
         help="Fraction of loaded events assigned to out-of-sample validation.",
     )
     parser.add_argument(
-        "--disable-is-oos-split",
+        "--disable-insample-outsample-split",
         action="store_true",
-        help="Disable IS/OOS partitioning and optimize using all loaded events.",
+        help="Disable insample/outsample partitioning and optimize using all loaded events.",
     )
     parser.add_argument(
         "--rebalance-freq",
@@ -699,16 +699,16 @@ def main() -> None:
         help="Override preset allow_shorts flag for this run.",
     )
     parser.add_argument(
-        "--is-pvalue-threshold",
+        "--insample-pvalue-threshold",
         type=float,
         default=0.01,
         help="Accept trial only if in-sample empirical p-value is below this threshold.",
     )
     parser.add_argument(
-        "--oos-pvalue-threshold",
+        "--outsample-pvalue-threshold",
         type=float,
         default=0.05,
-        help="Accept trial only if OOS walk-forward empirical p-value is below this threshold.",
+        help="Accept trial only if outsample walk-forward empirical p-value is below this threshold.",
     )
     parser.add_argument(
         "--precompute-indicators",
@@ -748,10 +748,10 @@ def main() -> None:
         raise ValueError("--workers must be > 0")
     if not (0.0 < float(args.out_of_sample_ratio) < 1.0):
         raise ValueError("--out-of-sample-ratio must be between 0 and 1")
-    if not (0.0 < float(args.is_pvalue_threshold) < 1.0):
-        raise ValueError("--is-pvalue-threshold must be between 0 and 1")
-    if not (0.0 < float(args.oos_pvalue_threshold) < 1.0):
-        raise ValueError("--oos-pvalue-threshold must be between 0 and 1")
+    if not (0.0 < float(args.insample_pvalue_threshold) < 1.0):
+        raise ValueError("--insample-pvalue-threshold must be between 0 and 1")
+    if not (0.0 < float(args.outsample_pvalue_threshold) < 1.0):
+        raise ValueError("--outsample-pvalue-threshold must be between 0 and 1")
 
     _vprint(
         bool(args.verbose),
@@ -783,7 +783,7 @@ def main() -> None:
 
     partition_seed = int(args.seed if args.partition_seed is None else args.partition_seed)
     partition: EventPartition | None = None
-    if args.disable_is_oos_split:
+    if args.disable_insample_outsample_split:
         in_sample_event_slugs = list(event_slugs)
         out_of_sample_event_slugs: list[str] = []
     else:
@@ -820,7 +820,7 @@ def main() -> None:
         (
             "Event split prepared "
             f"(in_sample={len(in_sample_event_slugs)}, out_of_sample={len(out_of_sample_event_slugs)}, "
-            f"partition_seed={partition_seed}, split_enabled={not args.disable_is_oos_split})"
+            f"partition_seed={partition_seed}, split_enabled={not args.disable_insample_outsample_split})"
         ),
     )
 
@@ -990,8 +990,8 @@ def main() -> None:
             verbose=bool(args.verbose),
             trial_writer=writer,
             top_n=top_n,
-            is_pvalue_threshold=float(args.is_pvalue_threshold),
-            oos_pvalue_threshold=float(args.oos_pvalue_threshold),
+            insample_pvalue_threshold=float(args.insample_pvalue_threshold),
+            outsample_pvalue_threshold=float(args.outsample_pvalue_threshold),
         )
     finally:
         writer.close()
@@ -1124,8 +1124,8 @@ def main() -> None:
         "best_score": float(best_score),
         "best_params": best_params,
         "selection_gates": {
-            "in_sample_pvalue_threshold": float(args.is_pvalue_threshold),
-            "out_of_sample_pvalue_threshold": float(args.oos_pvalue_threshold),
+            "in_sample_pvalue_threshold": float(args.insample_pvalue_threshold),
+            "out_of_sample_pvalue_threshold": float(args.outsample_pvalue_threshold),
         },
         "acceptance_stats": acceptance_stats,
         "partition": partition_payload,
@@ -1143,8 +1143,8 @@ def main() -> None:
         "best_rerun": bool(args.best_rerun),
         "skip_best_rerun": bool(not args.best_rerun),
         "selection_gates": {
-            "in_sample_pvalue_threshold": float(args.is_pvalue_threshold),
-            "out_of_sample_pvalue_threshold": float(args.oos_pvalue_threshold),
+            "in_sample_pvalue_threshold": float(args.insample_pvalue_threshold),
+            "out_of_sample_pvalue_threshold": float(args.outsample_pvalue_threshold),
         },
         "acceptance_stats": acceptance_stats,
         "output_dir": str(out_dir),
@@ -1171,7 +1171,7 @@ def main() -> None:
         print("Skipped final best-params rerun (faster completion; no regenerated best trades).")
     print(
         "Acceptance gates: "
-        f"IS p<{args.is_pvalue_threshold:.4f}, OOS walk-forward p<{args.oos_pvalue_threshold:.4f}"
+        f"insample p<{args.insample_pvalue_threshold:.4f}, outsample walk-forward p<{args.outsample_pvalue_threshold:.4f}"
     )
     print(f"Accepted trials: {acceptance_stats['accepted_trials']} / {n_trials_effective}")
     print(f"Best score: {best_score:.6f}")

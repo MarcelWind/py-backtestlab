@@ -1,6 +1,6 @@
 # Crypto Portfolio Backtesting Pipeline
 
-This document outlines a full, statistically sound pipeline for backtesting and evaluating **multi-asset crypto portfolio strategies** with minimal user input and proper out-of-sample (OOS) testing.
+This document outlines a full, statistically sound pipeline for backtesting and evaluating **multi-asset crypto portfolio strategies** with minimal user input and proper out-of-sample (outsample) testing.
 
 ---
 
@@ -13,9 +13,9 @@ Data ingestion & cleaning
         ↓
 Strategy definition (multi-asset)
         ↓
-Parameter optimization (IS)
+Parameter optimization (insample)
         ↓
-Walk-forward / OOS evaluation
+Walk-forward / outsample evaluation
         ↓
 Reporting & diagnostics
 ```
@@ -162,15 +162,15 @@ Keep objectives explicit and interpretable.
 
 ---
 
-## 5. Out-of-Sample (OOS) Testing
+## 5. Out-of-Sample (outsample) Testing
 
 ### Walk-Forward Validation
 Example schedule:
 ```
-2018–2020 → optimize (IS)
-2021       → test (OOS)
-2022–2023 → re-optimize (IS)
-2024       → test (OOS)
+2018–2020 → optimize (insample)
+2021       → test (outsample)
+2022–2023 → re-optimize (insample)
+2024       → test (outsample)
 ```
 
 This process should be fully automated.
@@ -181,7 +181,7 @@ This process should be fully automated.
 - Out-of-sample performance
 - Parameter stability metrics
 
-> Red flag: strong IS performance with poor OOS results indicates overfitting.
+> Red flag: strong insample performance with poor outsample results indicates overfitting.
 
 ---
 

@@ -262,16 +262,16 @@ def plot_comparison(
 
 
 def plot_permutation_cumulative_log_returns(
-    is_curves: list[pd.Series],
-    oos_curves: list[pd.Series],
+    insample_curves: list[pd.Series],
+    outsample_curves: list[pd.Series],
     *,
-    real_is_curve: pd.Series | None = None,
-    real_oos_curve: pd.Series | None = None,
+    real_insample_curve: pd.Series | None = None,
+    real_outsample_curve: pd.Series | None = None,
     title: str = "Permutation Test",
     subtitle: str | None = None,
     figsize: tuple[float, float] = (14, 8),
 ) -> Figure:
-    """Overlay IS/OOS permutation curves and highlighted real curves.
+    """Overlay insample/outsample permutation curves and highlighted real curves.
 
     The y-axis is expected to be cumulative log return.
     """
@@ -279,8 +279,8 @@ def plot_permutation_cumulative_log_returns(
     fig.patch.set_facecolor("black")
     ax.set_facecolor("black")
 
-    is_label_used = False
-    for curve in is_curves:
+    insample_label_used = False
+    for curve in insample_curves:
         if curve is None or curve.empty:
             continue
         x = np.arange(len(curve))
@@ -290,13 +290,13 @@ def plot_permutation_cumulative_log_returns(
             color="white",
             alpha=0.10,
             linewidth=1.0,
-            label=("IS Permutation" if not is_label_used else None),
+            label=("Insample Permutation" if not insample_label_used else None),
             zorder=1,
         )
-        is_label_used = True
+        insample_label_used = True
 
-    oos_label_used = False
-    for curve in oos_curves:
+    outsample_label_used = False
+    for curve in outsample_curves:
         if curve is None or curve.empty:
             continue
         x = np.arange(len(curve))
@@ -306,32 +306,32 @@ def plot_permutation_cumulative_log_returns(
             color="0.70",
             alpha=0.14,
             linewidth=1.0,
-            label=("OS Permutation" if not oos_label_used else None),
+            label=("Outsample Permutation" if not outsample_label_used else None),
             zorder=1,
         )
-        oos_label_used = True
+        outsample_label_used = True
 
-    if real_is_curve is not None and not real_is_curve.empty:
-        x_is = np.arange(len(real_is_curve))
+    if real_insample_curve is not None and not real_insample_curve.empty:
+        x_insample = np.arange(len(real_insample_curve))
         ax.plot(
-            x_is,
-            real_is_curve.to_numpy(dtype=float),
+            x_insample,
+            real_insample_curve.to_numpy(dtype=float),
             color="red",
             linewidth=2.4,
             alpha=0.95,
-            label="Real Optimized IS",
+            label="Real Optimized Insample",
             zorder=3,
         )
 
-    if real_oos_curve is not None and not real_oos_curve.empty:
-        x_oos = np.arange(len(real_oos_curve))
+    if real_outsample_curve is not None and not real_outsample_curve.empty:
+        x_outsample = np.arange(len(real_outsample_curve))
         ax.plot(
-            x_oos,
-            real_oos_curve.to_numpy(dtype=float),
+            x_outsample,
+            real_outsample_curve.to_numpy(dtype=float),
             color="#34d4ff",
             linewidth=2.2,
             alpha=0.95,
-            label="Real Optimized OS",
+            label="Real Optimized Outsample",
             zorder=3,
         )
 
@@ -1786,3 +1786,159 @@ def draw_cumulative_volume_delta_panel(
     ax_cum.axhline(0.0, color=cum_color, linestyle=":", linewidth=0.7, alpha=0.4, zorder=1)
     ax_cum.tick_params(axis="y", labelsize=7, labelcolor=cum_color)
     ax_cum.set_ylabel("cum Δ", fontsize=7, color=cum_color)
+
+
+# ---------------------------------------------------------------------------
+# MCPT plotting helpers
+# ---------------------------------------------------------------------------
+
+
+def plot_mcpt_histogram(
+    permuted_values: list[float],
+    real_value: float,
+    p_value: float,
+    title: str = "MCPT",
+    *,
+    figsize: tuple[float, float] = (10, 6),
+) -> Figure:
+    """Histogram of permuted scores with the real score overlaid.
+
+    Parameters
+    ----------
+    permuted_values:
+        Scores from permuted data.
+    real_value:
+        Score from the real (un-permuted) data.
+    p_value:
+        Estimated p-value to display in the title.
+    title:
+        Plot title prefix.
+    figsize:
+        Matplotlib figure size.
+
+    Returns
+    -------
+    :class:`~matplotlib.figure.Figure` — caller is responsible for saving.
+    """
+    plt.style.use("dark_background")
+    fig, ax = plt.subplots(figsize=figsize)
+    pd.Series(permuted_values).hist(ax=ax, color="steelblue", alpha=0.85, label="Permutations")
+    ax.axvline(real_value, color="red", linewidth=2.0, label="Real")
+    ax.set_xlabel("Profit Factor")
+    ax.set_title(f"{title}. P-Value: {p_value:.6f}")
+    ax.grid(False)
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def plot_cumulative_log_return(
+    returns: pd.Series,
+    title: str = "Cumulative Log Return",
+    *,
+    figsize: tuple[float, float] = (12, 5),
+) -> Figure:
+    """Single cumulative log-return curve on a dark background.
+
+    Parameters
+    ----------
+    returns:
+        Strategy log-return series (not cumulated).
+    title:
+        Plot title.
+    figsize:
+        Matplotlib figure size.
+
+    Returns
+    -------
+    :class:`~matplotlib.figure.Figure` — caller is responsible for saving.
+    """
+    plt.style.use("dark_background")
+    fig, ax = plt.subplots(figsize=figsize)
+    if len(returns) > 0:
+        series = returns.copy()
+        if not series.index.is_monotonic_increasing:
+            series = series.sort_index()
+        if series.index.has_duplicates:
+            series = series.groupby(level=0).mean()
+        cum = series.fillna(0.0).cumsum()
+        ax.plot(cum.index, cum.to_numpy(), color="orange", linewidth=1.5)
+    ax.set_ylabel("Cumulative Log Return")
+    ax.set_title(title)
+    ax.grid(alpha=0.2)
+    fig.tight_layout()
+    return fig
+
+
+def plot_mcpt_permutation_overlay(
+    real_returns: pd.Series,
+    perm_returns: list[pd.Series],
+    title: str = "Permutation Test",
+    *,
+    figsize: tuple[float, float] = (12, 7),
+) -> Figure:
+    """Overlay permuted cumulative log-return curves with the real curve.
+
+    Parameters
+    ----------
+    real_returns:
+        Strategy log-return series from real data.
+    perm_returns:
+        List of log-return series from permuted data.
+    title:
+        Plot title.
+    figsize:
+        Matplotlib figure size.
+
+    Returns
+    -------
+    :class:`~matplotlib.figure.Figure` — caller is responsible for saving.
+    """
+    plt.style.use("dark_background")
+    fig, ax = plt.subplots(figsize=figsize)
+
+    n_perm = len(perm_returns)
+    perm_label = f"Permutation Optimized (n={n_perm})"
+    perm_label_used = False
+    for rets in perm_returns:
+        series = _normalize_mcpt_series(rets)
+        if len(series) == 0:
+            continue
+        cum = series.fillna(0.0).cumsum()
+        ax.plot(
+            cum.index,
+            cum.to_numpy(),
+            color="white",
+            alpha=0.1,
+            linewidth=2.0,
+            label=perm_label if not perm_label_used else None,
+        )
+        perm_label_used = True
+
+    real_series = _normalize_mcpt_series(real_returns)
+    if len(real_series) > 0:
+        real_cum = real_series.fillna(0.0).cumsum()
+        ax.plot(
+            real_cum.index,
+            real_cum.to_numpy(),
+            color="red",
+            linewidth=2.4,
+            label="Real Optimized (n=1)",
+        )
+
+    ax.set_ylabel("Cumulative Log Return")
+    ax.set_title(title)
+    ax.grid(alpha=0.2)
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    return fig
+
+
+def _normalize_mcpt_series(returns: pd.Series) -> pd.Series:
+    """Sort, dedupe, and drop NaNs from a return series for plotting."""
+    series = returns.copy()
+    if not series.index.is_monotonic_increasing:
+        series = series.sort_index()
+    if series.index.has_duplicates:
+        series = series.groupby(level=0).mean()
+    return series.dropna()
