@@ -27,6 +27,8 @@ from stratlab.strategy.indicators import select_yes_no_columns
 from stratlab.validation.mcpt import aggregate_market_returns, concat_returns_in_order
 from strategies.weather_market_strategy import WeatherMarketImbalanceStrategy
 
+_VALID_OPTIMIZERS = ("random", "bayesian")
+
 
 # Re-use the suffix regex from indicators for column matching.
 _SUFFIX_RE = re.compile(r"^(.*)__(yes|no)$", re.IGNORECASE)
@@ -190,7 +192,10 @@ class WeatherMarketMCPTAdapter:
         scoring_fn: "Any | None" = None,
         verbose: bool = False,
         log_fn: "Any | None" = None,
+        optimizer: str = "random",
     ) -> None:
+        if optimizer not in _VALID_OPTIMIZERS:
+            raise ValueError(f"optimizer must be one of {_VALID_OPTIMIZERS}, got {optimizer!r}")
         self.base_params = dict(base_params)
         self.rules = rules
         self.rng = rng
@@ -200,6 +205,7 @@ class WeatherMarketMCPTAdapter:
         self.scoring_fn = scoring_fn
         self.verbose = verbose
         self.log_fn = log_fn or print
+        self.optimizer = optimizer
 
     # -- EventLevelMCPTStrategy interface -----------------------------------
 
@@ -208,7 +214,14 @@ class WeatherMarketMCPTAdapter:
         events: dict[str, dict[str, pd.DataFrame]],
         event_order: list[str],
     ) -> dict[str, Any]:
-        """Random search for best parameters on in-sample events."""
+        """Search for best parameters on in-sample events.
+
+        Uses random search or Bayesian optimization (Optuna TPE) depending
+        on ``self.optimizer``.
+        """
+        if self.optimizer == "bayesian":
+            return self._optimize_bayesian(events, event_order)
+
         if self.verbose:
             self.log_fn(
                 f"[optimize] Starting random search: {self.n_trials} trials, "
@@ -288,6 +301,91 @@ class WeatherMarketMCPTAdapter:
 
         if self.verbose:
             self.log_fn(f"[optimize] Done. Best {self.objective}={best_score / objective_sign:.6f}")
+
+        return best_params
+
+    def _optimize_bayesian(
+        self,
+        events: dict[str, dict[str, pd.DataFrame]],
+        event_order: list[str],
+    ) -> dict[str, Any]:
+        """Bayesian (Optuna TPE) parameter search over in-sample events."""
+        import optuna
+
+        from stratlab.optimize.bayesian_search import create_study, rules_to_optuna_params
+
+        if self.verbose:
+            self.log_fn(
+                f"[optimize] Starting Bayesian (TPE) search: {self.n_trials} trials, "
+                f"objective={self.objective}"
+            )
+            optuna.logging.set_verbosity(optuna.logging.INFO)
+        else:
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+        objective_sign = _metric_direction(self.objective)
+        event_snapshots: dict[str, dict[str, dict]] = {}
+        first_trial_done = False
+
+        def _objective(trial: optuna.Trial) -> float:
+            nonlocal first_trial_done, event_snapshots
+            chosen = rules_to_optuna_params(trial, self.rules, self.base_params)
+
+            event_scores: list[float] = []
+            capture = not first_trial_done
+
+            for slug in event_order:
+                if capture:
+                    rets, snaps = self._backtest_event_with_capture(events[slug], chosen)
+                    if snaps:
+                        event_snapshots[slug] = snaps
+                else:
+                    rets = self._backtest_event(
+                        events[slug], chosen,
+                        indicator_snapshots=event_snapshots.get(slug),
+                    )
+                if rets.empty:
+                    continue
+                score = self._score_returns(rets)
+                if np.isfinite(score):
+                    event_scores.append(score)
+
+            first_trial_done = True
+
+            if not event_scores:
+                return float("-inf")
+
+            agg_score = float(np.mean(event_scores))
+
+            if self.verbose:
+                self.log_fn(
+                    f"[optimize] trial {trial.number + 1}/{self.n_trials}: "
+                    f"{self.objective}={agg_score / objective_sign:.6f} "
+                    f"({len(event_scores)} events)"
+                )
+
+            if (trial.number + 1) % 50 == 0:
+                gc.collect()
+
+            return agg_score
+
+        # Derive int seed from the RNG for Optuna sampler reproducibility.
+        optuna_seed = int(self.rng.integers(0, 2**31))
+        study = create_study(optuna_seed, direction="maximize")
+        study.optimize(_objective, n_trials=self.n_trials, show_progress_bar=False)
+
+        # Extract best params from the study.  ``study.best_params`` only
+        # contains the suggested values; fixed-value and disabled params
+        # are not tracked by Optuna.  Re-run the conversion on a frozen
+        # trial to get the full dict.
+        best_trial = study.best_trial
+        best_params = rules_to_optuna_params(best_trial, self.rules, self.base_params)
+
+        if self.verbose:
+            self.log_fn(
+                f"[optimize] Done. Best {self.objective}="
+                f"{study.best_value / objective_sign:.6f} (trial {best_trial.number + 1})"
+            )
 
         return best_params
 

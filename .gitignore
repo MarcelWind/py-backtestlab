@@ -224,6 +224,7 @@ polymarket_data/
 # Market Data
 data/
 *.parquet
+*.pq
 *.zip
 
 # explitly add stratlab/data source files
@@ -234,3 +235,7 @@ data/
 
 # Debugger
 .vscode/launch.json
+
+# Backtesting parameters
+weather_market_monte_carlo_params.json
+weather_market_monte_carlo_events.json

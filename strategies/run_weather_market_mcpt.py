@@ -231,6 +231,15 @@ def main() -> None:
             "per-permutation loop. Faster but requires hold-to-end exit mode."
         ),
     )
+    parser.add_argument(
+        "--optimizer",
+        choices=["random", "bayesian"],
+        default="random",
+        help=(
+            "Parameter search algorithm. 'random' uses uniform random sampling; "
+            "'bayesian' uses Optuna TPE (Tree-structured Parzen Estimator)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.n_trials <= 0:
@@ -252,6 +261,7 @@ def main() -> None:
         (
             "Starting weather MCPT run "
             f"(profile={args.profile}, objective={args.objective}, "
+            f"optimizer={args.optimizer}, "
             f"n_trials={args.n_trials}, "
             f"insample_perms={args.n_permutations_insample}, "
             f"outsample_perms={args.n_permutations_outsample}, "
@@ -341,6 +351,7 @@ def main() -> None:
         scoring_fn=scoring_fn,
         verbose=verbose,
         log_fn=lambda msg: _vprint(verbose, msg),
+        optimizer=args.optimizer,
     )
 
     # --- Output directory ---------------------------------------------------
@@ -466,6 +477,7 @@ def main() -> None:
     summary_payload: dict[str, Any] = {
         "profile": args.profile,
         "objective": args.objective,
+        "optimizer": args.optimizer,
         "n_trials": args.n_trials,
         "n_permutations_insample": args.n_permutations_insample,
         "n_permutations_outsample": args.n_permutations_outsample,

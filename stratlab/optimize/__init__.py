@@ -21,6 +21,10 @@ from .rule_search import (
     rule_to_spec,
     sample_trial_params,
 )
+from .bayesian_search import (
+    create_study,
+    rules_to_optuna_params,
+)
 
 __all__ = [
     "ObjectiveFunc",
@@ -38,4 +42,6 @@ __all__ = [
     "rule_enabled",
     "rule_to_spec",
     "sample_trial_params",
+    "create_study",
+    "rules_to_optuna_params",
 ]

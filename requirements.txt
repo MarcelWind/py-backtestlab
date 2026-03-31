@@ -11,5 +11,8 @@ ipykernel
 # Plotting
 matplotlib
 
+# Optimization
+optuna
+
 # Macro data
 fredapi
