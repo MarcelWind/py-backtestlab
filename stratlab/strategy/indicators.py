@@ -2042,11 +2042,48 @@ class CumulativeYesNoDelta(Indicator):
     def compute(self, prices: pd.DataFrame, returns: pd.DataFrame, index: int) -> pd.Series:
         if self._next_bar < 0:
             self._next_bar = 0
+        if self._next_bar > index:
+            # Snapshot replay path: history is already populated past `index`.
+            result = {
+                a: (self._history[a][index] if a in self._history and index < len(self._history[a]) else float("nan"))
+                for a in prices.columns
+            }
+            return pd.Series(result, dtype=float)
         for i in range(self._next_bar, index + 1):
             self._process_bar(prices, i)
         self._next_bar = index + 1
         result = {a: (self._history[a][-1] if a in self._history and self._history[a] else float("nan")) for a in prices.columns}
         return pd.Series(result, dtype=float)
+
+    def snapshot(self) -> dict:
+        """Return a shallow-copy snapshot of all accumulated state."""
+        return {
+            "_history": {a: list(v) for a, v in self._history.items()},
+            "_ts_lists": {a: list(v) for a, v in self._ts_lists.items()},
+            "_col_map": dict(self._col_map),
+            "_baseline_map": dict(self._baseline_map),
+            "_sums": dict(self._sums),
+            "_sum_sqs": dict(self._sum_sqs),
+            "_counts": dict(self._counts),
+            "_mean_history": {a: list(v) for a, v in self._mean_history.items()},
+            "_std_history": {a: list(v) for a, v in self._std_history.items()},
+            "_thr_history": {a: list(v) for a, v in self._thr_history.items()},
+            "_next_bar": self._next_bar,
+        }
+
+    def restore(self, snap: dict) -> None:
+        """Restore accumulated state from a snapshot produced by :meth:`snapshot`."""
+        self._history = {a: list(v) for a, v in snap["_history"].items()}
+        self._ts_lists = {a: list(v) for a, v in snap["_ts_lists"].items()}
+        self._col_map = dict(snap["_col_map"])
+        self._baseline_map = dict(snap["_baseline_map"])
+        self._sums = dict(snap["_sums"])
+        self._sum_sqs = dict(snap["_sum_sqs"])
+        self._counts = dict(snap["_counts"])
+        self._mean_history = {a: list(v) for a, v in snap["_mean_history"].items()}
+        self._std_history = {a: list(v) for a, v in snap["_std_history"].items()}
+        self._thr_history = {a: list(v) for a, v in snap["_thr_history"].items()}
+        self._next_bar = snap["_next_bar"]
 
     def series(self, asset: str) -> "pd.Series | None":
         """Return full cumulative series for *asset* as a pd.Series indexed by timestamps.

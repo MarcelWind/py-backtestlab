@@ -30,10 +30,12 @@ def compute_metrics(returns: pd.Series, annualization_factor: int = 252) -> dict
     if len(returns) == 0:
         return {}
 
-    # Basic returns
-    cumulative = (1 + returns).prod()
+    # Basic returns — use log-space accumulation to avoid overflow
+    # with extreme permuted prediction-market returns.
+    log_returns = np.log1p(returns.clip(lower=-1 + 1e-15))
+    cumulative = np.exp(log_returns.sum())
     total_return = _to_float(cumulative) - 1
-    annual_return = _to_float((1 + total_return) ** (annualization_factor / len(returns)) - 1)
+    annual_return = _to_float(np.expm1(log_returns.sum() * (annualization_factor / len(returns))))
     average_return = _to_float(returns.mean())
 
     # Volatility
@@ -50,8 +52,9 @@ def compute_metrics(returns: pd.Series, annualization_factor: int = 252) -> dict
     gross_loss = abs(_to_float(losses.sum())) if len(losses) > 0 else 0.0
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0.0
 
-    # Drawdown metrics
-    cum_returns = (1 + returns).cumprod()
+    # Drawdown metrics — log-space cumprod to avoid overflow
+    cum_log = log_returns.cumsum()
+    cum_returns = np.exp(cum_log)
     rolling_max = cum_returns.expanding().max()
     drawdown = (cum_returns - rolling_max) / rolling_max
     max_drawdown = _to_float(drawdown.min())

@@ -1799,6 +1799,7 @@ def plot_mcpt_histogram(
     p_value: float,
     title: str = "MCPT",
     *,
+    xlabel: str = "Score",
     figsize: tuple[float, float] = (10, 6),
 ) -> Figure:
     """Histogram of permuted scores with the real score overlaid.
@@ -1813,6 +1814,8 @@ def plot_mcpt_histogram(
         Estimated p-value to display in the title.
     title:
         Plot title prefix.
+    xlabel:
+        Label for the x-axis (e.g. the objective metric name).
     figsize:
         Matplotlib figure size.
 
@@ -1822,9 +1825,9 @@ def plot_mcpt_histogram(
     """
     plt.style.use("dark_background")
     fig, ax = plt.subplots(figsize=figsize)
-    pd.Series(permuted_values).hist(ax=ax, color="steelblue", alpha=0.85, label="Permutations")
+    pd.Series(permuted_values).hist(ax=ax, bins=30, color="steelblue", alpha=0.85, label="Permutations")
     ax.axvline(real_value, color="red", linewidth=2.0, label="Real")
-    ax.set_xlabel("Profit Factor")
+    ax.set_xlabel(xlabel)
     ax.set_title(f"{title}. P-Value: {p_value:.6f}")
     ax.grid(False)
     ax.legend()

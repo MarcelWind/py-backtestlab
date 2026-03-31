@@ -115,3 +115,50 @@ def get_permutation(
         return perm_ohlc
     else:
         return perm_ohlc[0]
+
+
+def permute_event_bars(
+    event_data: dict[str, pd.DataFrame],
+    seed: int | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Shuffle full rows across all submarket DataFrames for one event.
+
+    Unlike :func:`get_permutation` which decomposes into log-space gap/intrabar
+    moves (OHLC only), this function performs a simple row-index permutation
+    that keeps all columns within each bar consistent (OHLC, volume, vwap, etc.).
+
+    All submarkets share the same permutation order so cross-asset relationships
+    within each bar are preserved.
+
+    Parameters
+    ----------
+    event_data:
+        ``{submarket_col: df, ...}`` where each DataFrame has a DatetimeIndex
+        and arbitrary columns.
+    seed:
+        Optional RNG seed for reproducibility.
+
+    Returns
+    -------
+    Dict with the same keys, each DataFrame row-permuted with original index.
+    """
+    if not event_data:
+        return {}
+
+    rng = np.random.default_rng(seed)
+
+    # Determine the permutation from the first submarket.
+    first_df = next(iter(event_data.values()))
+    n_bars = len(first_df)
+    perm_idx = rng.permutation(n_bars)
+
+    result: dict[str, pd.DataFrame] = {}
+    for col, df in event_data.items():
+        assert len(df) == n_bars, (
+            f"Submarket '{col}' has {len(df)} bars, expected {n_bars}"
+        )
+        original_index = df.index
+        shuffled = df.iloc[perm_idx].copy()
+        shuffled.index = original_index
+        result[col] = shuffled
+    return result
