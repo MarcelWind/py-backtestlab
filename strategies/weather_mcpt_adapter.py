@@ -239,6 +239,9 @@ class WeatherMarketMCPTAdapter:
         # indicators (SdBands, Vwap, CumulativeYesNoDelta) skip the O(n)
         # catch-up loop.
         event_snapshots: dict[str, dict[str, dict]] = {}
+        # Cache reconstructed matrices per event to avoid re-creating 9
+        # DataFrames on every trial × event call.
+        matrix_cache: dict[int, tuple] = {}
 
         for trial_idx in range(self.n_trials):
             # Sample unique params
@@ -260,13 +263,16 @@ class WeatherMarketMCPTAdapter:
             capture = trial_idx == 0  # capture snapshots on first trial
             for slug in event_order:
                 if capture:
-                    rets, snaps = self._backtest_event_with_capture(events[slug], chosen)
+                    rets, snaps = self._backtest_event_with_capture(
+                        events[slug], chosen, matrix_cache=matrix_cache,
+                    )
                     if snaps:
                         event_snapshots[slug] = snaps
                 else:
                     rets = self._backtest_event(
                         events[slug], chosen,
                         indicator_snapshots=event_snapshots.get(slug),
+                        matrix_cache=matrix_cache,
                     )
                 if rets.empty:
                     continue
@@ -296,7 +302,7 @@ class WeatherMarketMCPTAdapter:
                     f"({len(event_scores)} events){marker}"
                 )
 
-            if (trial_idx + 1) % 50 == 0:
+            if (trial_idx + 1) % 10 == 0:
                 gc.collect()
 
         if self.verbose:
@@ -325,6 +331,7 @@ class WeatherMarketMCPTAdapter:
 
         objective_sign = _metric_direction(self.objective)
         event_snapshots: dict[str, dict[str, dict]] = {}
+        matrix_cache: dict[int, tuple] = {}
         first_trial_done = False
 
         def _objective(trial: optuna.Trial) -> float:
@@ -336,13 +343,16 @@ class WeatherMarketMCPTAdapter:
 
             for slug in event_order:
                 if capture:
-                    rets, snaps = self._backtest_event_with_capture(events[slug], chosen)
+                    rets, snaps = self._backtest_event_with_capture(
+                        events[slug], chosen, matrix_cache=matrix_cache,
+                    )
                     if snaps:
                         event_snapshots[slug] = snaps
                 else:
                     rets = self._backtest_event(
                         events[slug], chosen,
                         indicator_snapshots=event_snapshots.get(slug),
+                        matrix_cache=matrix_cache,
                     )
                 if rets.empty:
                     continue
@@ -364,7 +374,7 @@ class WeatherMarketMCPTAdapter:
                     f"({len(event_scores)} events)"
                 )
 
-            if (trial.number + 1) % 50 == 0:
+            if (trial.number + 1) % 10 == 0:
                 gc.collect()
 
             return agg_score
@@ -380,12 +390,18 @@ class WeatherMarketMCPTAdapter:
         # trial to get the full dict.
         best_trial = study.best_trial
         best_params = rules_to_optuna_params(best_trial, self.rules, self.base_params)
+        best_value = study.best_value
 
         if self.verbose:
             self.log_fn(
                 f"[optimize] Done. Best {self.objective}="
-                f"{study.best_value / objective_sign:.6f} (trial {best_trial.number + 1})"
+                f"{best_value / objective_sign:.6f} (trial {best_trial.number + 1})"
             )
+
+        # Free intermediate state before proceeding to MCPT.
+        del study, event_snapshots
+        matrix_cache.clear()
+        gc.collect()
 
         return best_params
 
@@ -426,19 +442,46 @@ class WeatherMarketMCPTAdapter:
             if snap is not None and hasattr(ind, "restore"):
                 ind.restore(snap)
 
+    @staticmethod
+    def _get_or_reconstruct(
+        event_data: dict[str, pd.DataFrame],
+        cache: "dict[int, tuple] | None" = None,
+    ) -> tuple:
+        """Return cached matrices or reconstruct and cache them.
+
+        The cache key is ``id(event_data)`` which is stable for the same dict
+        object across trials.  This avoids re-creating 9 DataFrames on every
+        trial × event call.
+        """
+        if cache is not None:
+            key = id(event_data)
+            hit = cache.get(key)
+            if hit is not None:
+                return hit
+            matrices = _reconstruct_matrices(event_data)
+            cache[key] = matrices
+            return matrices
+        return _reconstruct_matrices(event_data)
+
     def _backtest_event(
         self,
         event_data: dict[str, pd.DataFrame],
         chosen_params: dict[str, Any],
         indicator_snapshots: dict[str, dict] | None = None,
+        matrix_cache: "dict[int, tuple] | None" = None,
     ) -> pd.Series:
         """Run a single backtest on event data, return portfolio returns.
 
         When *indicator_snapshots* is provided, data-only indicators are
         restored from snapshots before the backtest, eliminating redundant
         catch-up computation.
+
+        When *matrix_cache* is provided, ``_reconstruct_matrices`` results are
+        cached per event to avoid repeated DataFrame construction.
         """
-        prices, returns, vwap, volume, high, low, open_, buy_vol, sell_vol = _reconstruct_matrices(event_data)
+        prices, returns, vwap, volume, high, low, open_, buy_vol, sell_vol = (
+            self._get_or_reconstruct(event_data, matrix_cache)
+        )
         if prices.empty or len(prices) < 3:
             return pd.Series(dtype=float)
 
@@ -470,6 +513,7 @@ class WeatherMarketMCPTAdapter:
         strategy.trade_log.clear()
 
         portfolio_returns = result.get("returns")
+        del strategy, result
         if portfolio_returns is None or not isinstance(portfolio_returns, pd.Series):
             return pd.Series(dtype=float)
         return portfolio_returns
@@ -478,9 +522,12 @@ class WeatherMarketMCPTAdapter:
         self,
         event_data: dict[str, pd.DataFrame],
         chosen_params: dict[str, Any],
+        matrix_cache: "dict[int, tuple] | None" = None,
     ) -> tuple[pd.Series, dict[str, dict]]:
         """Like _backtest_event but also returns indicator snapshots."""
-        prices, returns, vwap, volume, high, low, open_, buy_vol, sell_vol = _reconstruct_matrices(event_data)
+        prices, returns, vwap, volume, high, low, open_, buy_vol, sell_vol = (
+            self._get_or_reconstruct(event_data, matrix_cache)
+        )
         if prices.empty or len(prices) < 3:
             return pd.Series(dtype=float), {}
 
@@ -510,6 +557,7 @@ class WeatherMarketMCPTAdapter:
         strategy.trade_log.clear()
 
         portfolio_returns = result.get("returns")
+        del strategy, result
         if portfolio_returns is None or not isinstance(portfolio_returns, pd.Series):
             return pd.Series(dtype=float), snaps
         return portfolio_returns, snaps

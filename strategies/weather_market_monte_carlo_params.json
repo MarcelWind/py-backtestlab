@@ -3,7 +3,7 @@
     {
       "name": "allow_longs",
       "type": "bool",
-      "values": [true]
+      "values": [true,false]
     },
     {
       "name": "allow_shorts",
@@ -13,13 +13,13 @@
     {
       "name": "use_market_regime",
       "type": "bool",
-      "values": [true]
+      "values": [true,false]
     },
     {
       "name": "lookback_hours",
       "type": "float",
-      "low": 3.0,
-      "high": 12.0,
+      "low": 6.0,
+      "high": 15.0,
       "step": 3.0,
         "enabled_if": {
             "use_market_regime": true
@@ -164,7 +164,7 @@
     {
       "name": "use_vwap_volume_imbalance_filter",
       "type": "bool",
-      "values": [false]
+      "values": [true,false]
     },
     {
       "name": "vwap_volume_imbalance_lookback",
@@ -201,12 +201,12 @@
     {
       "name": "use_buy_cvd_filter",
       "type": "bool",
-      "values": [true]
+      "values": [true,false]
     },
     {
       "name": "use_buy_cvd_3sd_gate",
       "type": "bool",
-      "values": [false],
+      "values": [true,false],
       "enabled_if": {
         "use_buy_cvd_filter": true
       }
@@ -214,9 +214,9 @@
     {
       "name": "max_buy_cvd_for_short",
       "type": "float",
-      "low": -1000.0,
-      "high": -1000.0,
-      "step": 0.0,
+      "low": -5000.0,
+      "high": 0.0,
+      "step": 1000.0,
       "enabled_if": {
         "use_buy_cvd_filter": true,
         "allow_shorts": true
@@ -225,9 +225,9 @@
     {
       "name": "min_buy_cvd_for_long",
       "type": "float",
-      "low": 1000.0,
-      "high": 1000.0,
-      "step": 0.0,
+      "low": 0.0,
+      "high": 5000.0,
+      "step": 1000.0,
       "enabled_if": {
         "use_buy_cvd_filter": true,
         "allow_longs": true
@@ -268,7 +268,7 @@
     {
       "name": "use_stop_loss",
       "type": "bool",
-      "values": [false]
+      "values": [true,false]
     },
     {
       "name": "stop_loss_mode",
