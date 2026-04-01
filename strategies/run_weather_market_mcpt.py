@@ -240,6 +240,16 @@ def main() -> None:
             "'bayesian' uses Optuna TPE (Tree-structured Parzen Estimator)."
         ),
     )
+    parser.add_argument(
+        "--cache-snapshots",
+        action="store_true",
+        default=False,
+        help=(
+            "Cache indicator snapshots across optimization trials. "
+            "Faster but uses ~200 MB+ extra RAM for large event sets. "
+            "Omit this flag to save memory."
+        ),
+    )
     args = parser.parse_args()
 
     if args.n_trials <= 0:
@@ -302,6 +312,9 @@ def main() -> None:
                 f"(resample={resample_rule or 'native'})"
             ),
         )
+        # Periodically release PyArrow / parquet intermediate buffers.
+        if idx % 50 == 0:
+            gc.collect()
 
     # --- Partition IS / OOS -------------------------------------------------
     partition_seed = int(args.seed if args.partition_seed is None else args.partition_seed)
@@ -323,8 +336,17 @@ def main() -> None:
 
     # --- Convert to MCPT format ---------------------------------------------
     all_mcpt_events = bundles_to_mcpt_events(event_data)
+
+    # Free the original EventBundles — all data now lives in MCPT format.
+    del event_data
+    gc.collect()
+
     is_events = {s: all_mcpt_events[s] for s in in_sample_event_slugs}
     oos_events = {s: all_mcpt_events[s] for s in out_of_sample_event_slugs}
+
+    # is_events / oos_events hold the only remaining references.
+    del all_mcpt_events
+    gc.collect()
 
     # --- Prepare adapter ----------------------------------------------------
     base_params = WeatherMarketImbalanceStrategy.profile_params(args.profile)
@@ -352,6 +374,7 @@ def main() -> None:
         verbose=verbose,
         log_fn=lambda msg: _vprint(verbose, msg),
         optimizer=args.optimizer,
+        cache_snapshots=args.cache_snapshots,
     )
 
     # --- Output directory ---------------------------------------------------
