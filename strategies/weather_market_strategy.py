@@ -354,7 +354,12 @@ class WeatherMarketImbalanceStrategy(Strategy):
         _cum_buy_delta = None
         _cum_sell_delta = None
         if needs_cvd:
-            _cum_buy_delta = CumulativeYesNoDelta(volume_df=buy_volume, name="cum_buy_delta")
+            _cum_buy_delta = CumulativeYesNoDelta(volume_df=buy_volume, name="cum_buy_delta",
+                open_=_open,
+                high=_high,
+                low=_low,
+                dollar_weighted=True,
+            )
             _cum_sell_delta = CumulativeYesNoDelta(volume_df=sell_volume, name="cum_sell_delta")
             self.indicator_defs.extend([_cum_buy_delta, _cum_sell_delta])
             if self.use_buy_cvd_3sd_gate and _cum_buy_delta is not None:

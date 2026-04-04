@@ -257,6 +257,68 @@ def _transform_slope(raw: float, mode: str, value_per_point: float, scale: float
     raise ValueError(f"Unsupported vwap_slope_mode={mode!r}")
 
 
+def _safe_frame_value(frame: pd.DataFrame | None, row_idx: int, col: str) -> float | None:
+    """Return a finite float from frame[row_idx, col], else None."""
+    if frame is None or frame.empty or col not in frame.columns:
+        return None
+    try:
+        value = float(frame.iloc[row_idx][col])
+    except Exception:
+        return None
+    if not np.isfinite(value):
+        return None
+    return value
+
+
+def _dollar_volume_from_ohlc(
+    volume: float,
+    close: float,
+    high: float | None,
+    low: float | None,
+    open_: float | None,
+) -> float:
+    """Convert raw volume to dollar volume using (O+H+L+C)/4 price."""
+    if not np.isfinite(volume):
+        return 0.0
+    avg_price = _compute_price(
+        close=close,
+        high=high,
+        low=low,
+        open_=open_,
+        method="ohlc_avg",
+    )
+    if not np.isfinite(avg_price):
+        return 0.0
+    return float(volume * avg_price)
+
+
+def _dollarize_yes_no_volumes(
+    yes_volume: float,
+    no_volume: float,
+    close: float,
+    high: float | None,
+    low: float | None,
+    open_: float | None,
+) -> tuple[float, float, float]:
+    """Return buy/sell dollar volumes and dollar delta from yes/no volumes."""
+    if not np.isfinite(yes_volume):
+        yes_volume = 0.0
+    if not np.isfinite(no_volume):
+        no_volume = 0.0
+    avg_price = _compute_price(
+        close=close,
+        high=high,
+        low=low,
+        open_=open_,
+        method="ohlc_avg",
+    )
+    if not np.isfinite(avg_price):
+        return 0.0, 0.0, 0.0
+    buy_dollar = float(yes_volume * avg_price)
+    sell_dollar = float(no_volume * avg_price)
+    return buy_dollar, sell_dollar, float(buy_dollar - sell_dollar)
+
+
 # ---------------------------------------------------------------------------
 # Yes/No cumulative delta helpers
 # ---------------------------------------------------------------------------
@@ -1955,9 +2017,23 @@ class CumulativeYesNoDelta(Indicator):
     def name(self) -> str:
         return self._indicator_name
 
-    def __init__(self, volume_df: pd.DataFrame | None = None, name: str = "cum_yes_no_delta") -> None:
+    def __init__(
+        self,
+        volume_df: pd.DataFrame | None = None,
+        name: str = "cum_yes_no_delta",
+        open_: pd.DataFrame | None = None,
+        high: pd.DataFrame | None = None,
+        low: pd.DataFrame | None = None,
+        close: pd.DataFrame | None = None,
+        dollar_weighted: bool = False,
+    ) -> None:
         self._volume = volume_df if volume_df is not None else pd.DataFrame()
         self._indicator_name = name
+        self._open = open_
+        self._high = high
+        self._low = low
+        self._close = close
+        self._dollar_weighted = bool(dollar_weighted)
         self._history: dict[str, list[float]] = {}
         self._ts_lists: dict[str, list] = {}
         self._col_map: dict[str, tuple[str | None, str | None]] = {}
@@ -2017,6 +2093,22 @@ class CumulativeYesNoDelta(Indicator):
             if not np.isfinite(no):
                 no = 0.0
             delta = yes - no
+            if self._dollar_weighted:
+                close_val = _safe_frame_value(self._close, i, asset)
+                if close_val is None:
+                    close_val = _safe_frame_value(prices, i, asset)
+                if close_val is not None:
+                    open_val = _safe_frame_value(self._open, i, asset)
+                    high_val = _safe_frame_value(self._high, i, asset)
+                    low_val = _safe_frame_value(self._low, i, asset)
+                    _, _, delta = _dollarize_yes_no_volumes(
+                        yes_volume=yes,
+                        no_volume=no,
+                        close=close_val,
+                        high=high_val,
+                        low=low_val,
+                        open_=open_val,
+                    )
             prev = self._history.get(asset, [0.0])[-1] if self._history.get(asset) else 0.0
             cur = prev + delta
             self._history.setdefault(asset, []).append(cur)
