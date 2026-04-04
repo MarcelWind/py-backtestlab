@@ -22,6 +22,7 @@ from stratlab.backtest.backtester import Backtester
 from stratlab.config import RESULTS_DIR
 from strategies.weather_backtest import load_event_ohlcv_resampled, plot_entries_exits
 from strategies.weather_market_strategy import WeatherMarketImbalanceStrategy
+from strategies.weather_prediction import parse_event_slug
 
 
 def find_latest_backtest_dir(event_slug: str) -> Path | None:
@@ -320,6 +321,15 @@ def main() -> None:
     except Exception:
         buy_volume_full = buy_volume
         sell_volume_full = sell_volume
+
+    # Compute market_end_time from slug for rotational entry logic.
+    try:
+        _slug_info = parse_event_slug(event_slug)
+        _market_end_time = _slug_info["date"].replace(hour=23, minute=59)
+    except Exception:
+        _market_end_time = None
+    if _market_end_time is not None:
+        strategy_overrides.setdefault("market_end_time", _market_end_time)
 
     strategy = WeatherMarketImbalanceStrategy.from_profile(
         args.profile,

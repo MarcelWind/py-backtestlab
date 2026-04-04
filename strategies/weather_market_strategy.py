@@ -116,6 +116,28 @@ class WeatherMarketImbalanceStrategy(Strategy):
         min_sell_price: float | None = 0.05,
         max_buy_price: float | None = 0.95,
         track_delta_history: bool = True,
+        # Market regime mode: "imbalance" (default) or "rotational"
+        market_regime_mode: str = "imbalance",
+        # Rotational entry parameters (active when market_regime_mode="rotational")
+        rotational_price_source: str = "highlow",
+        rotational_entry_band: int = 3,
+        rotational_exit_offset: int | str = 1,
+        rotational_window_hours: float = 12.0,
+        rotational_regimes: list[str] | None = None,
+        market_end_time: pd.Timestamp | None = None,
+        # Renamed imbalance-mode slope/volume thresholds (preferred canonical names).
+        # "min" semantics: "minimum -1.0 or lower" — slope/imbalance must be
+        # at least this extreme to confirm the imbalance trend.
+        min_vwap_slope_for_short: float | None = None,
+        min_vwap_volume_imbalance_pct_for_short: float | None = None,
+        # Rotational-mode slope/volume ceilings.
+        # "max" semantics: slope/imbalance must not exceed this value,
+        # preventing entries when conditions suggest imbalance rather than rotation.
+        max_vwap_slope_for_long: float | None = None,
+        max_vwap_volume_imbalance_pct_for_short_rot: float | None = None,
+        max_vwap_volume_imbalance_pct_for_long_rot: float | None = None,
+        max_vwap_slope_for_short_rot: float | None = None,
+        max_vwap_slope_for_long_rot: float | None = None,
     ):
         """Initialize the weather imbalance strategy.
 
@@ -270,20 +292,72 @@ class WeatherMarketImbalanceStrategy(Strategy):
         self.min_sell_price = None if min_sell_price is None else float(min_sell_price)
         self.max_buy_price = None if max_buy_price is None else float(max_buy_price)
 
+        # Market regime mode
+        self.market_regime_mode = str(market_regime_mode)
+        if self.market_regime_mode not in {"imbalance", "rotational"}:
+            raise ValueError("market_regime_mode must be 'imbalance' or 'rotational'")
+
+        # Rotational entry configuration
+        self.rotational_price_source = str(rotational_price_source)
+        if self.rotational_price_source not in {"highlow", "open", "close"}:
+            raise ValueError(
+                "rotational_price_source must be one of: highlow, open, close"
+            )
+        self.rotational_entry_band = int(rotational_entry_band)
+        _be_exit = rotational_exit_offset
+        if isinstance(_be_exit, str):
+            if _be_exit != "mean":
+                raise ValueError("rotational_exit_offset string must be 'mean'")
+            self.rotational_exit_offset: int | str = "mean"
+        else:
+            _be_exit_int = int(_be_exit)
+            if _be_exit_int not in {1, 2, 3, 4, 5, 6}:
+                raise ValueError("rotational_exit_offset must be 1, 2, 3, 4, 5, 6 or 'mean'")
+            self.rotational_exit_offset = _be_exit_int
+        self.rotational_window_hours = float(rotational_window_hours)
+        self.rotational_regimes: list[str] = (
+            list(rotational_regimes) if rotational_regimes is not None
+            else ["Balanced", "Rotational"]
+        )
+        self.market_end_time = (
+            pd.Timestamp(market_end_time) if market_end_time is not None else None
+        )
+
         self.use_vwap_slope_filter = bool(use_vwap_slope_filter)
         self.use_vwap_volume_imbalance_filter = bool(use_vwap_volume_imbalance_filter)
-        self.max_vwap_volume_imbalance_pct_for_short = (
-            float(max_vwap_volume_imbalance_pct_for_short)
-            if max_vwap_volume_imbalance_pct_for_short is not None
-            else float(max_vwap_volume_imbalance_pct)
+
+        # --- Volume imbalance thresholds ---
+        # Imbalance mode: resolve canonical min_* from new or old param name.
+        _imb_vol_short = (
+            float(min_vwap_volume_imbalance_pct_for_short)
+            if min_vwap_volume_imbalance_pct_for_short is not None
+            else (
+                float(max_vwap_volume_imbalance_pct_for_short)
+                if max_vwap_volume_imbalance_pct_for_short is not None
+                else float(max_vwap_volume_imbalance_pct)
+            )
         )
-        # keep legacy attribute name for compatibility with existing callers
-        self.max_vwap_volume_imbalance_pct = self.max_vwap_volume_imbalance_pct_for_short
+        self.min_vwap_volume_imbalance_pct_for_short = _imb_vol_short
+        # keep legacy attribute names for compatibility with existing callers
+        self.max_vwap_volume_imbalance_pct_for_short = _imb_vol_short
+        self.max_vwap_volume_imbalance_pct = _imb_vol_short
         self.min_vwap_volume_imbalance_pct_for_long = (
             float(min_vwap_volume_imbalance_pct_for_long)
             if min_vwap_volume_imbalance_pct_for_long is not None
-            else self.max_vwap_volume_imbalance_pct_for_short
+            else _imb_vol_short
         )
+        # Rotational mode volume imbalance ceilings
+        self.max_vwap_volume_imbalance_pct_for_short_rot = (
+            float(max_vwap_volume_imbalance_pct_for_short_rot)
+            if max_vwap_volume_imbalance_pct_for_short_rot is not None
+            else None
+        )
+        self.max_vwap_volume_imbalance_pct_for_long_rot = (
+            float(max_vwap_volume_imbalance_pct_for_long_rot)
+            if max_vwap_volume_imbalance_pct_for_long_rot is not None
+            else None
+        )
+
         self.vwap = vwap
         self.volume = volume
         self.vwap_slope_mode = str(vwap_slope_mode)
@@ -294,17 +368,40 @@ class WeatherMarketImbalanceStrategy(Strategy):
             self.vwap_volume_imbalance_lookback = int(vwap_slope_lookback)
         else:
             self.vwap_volume_imbalance_lookback = int(vwap_volume_imbalance_lookback)
-        self.max_vwap_slope_for_short = (
-            float(max_vwap_slope_for_short)
-            if max_vwap_slope_for_short is not None
-            else float(max_vwap_slope)
+        # --- VWAP slope thresholds ---
+        # Imbalance mode: resolve canonical min_* from new or old param name.
+        _imb_slope_short = (
+            float(min_vwap_slope_for_short)
+            if min_vwap_slope_for_short is not None
+            else (
+                float(max_vwap_slope_for_short)
+                if max_vwap_slope_for_short is not None
+                else float(max_vwap_slope)
+            )
         )
-        # keep legacy attribute name for compatibility with existing callers
-        self.max_vwap_slope = self.max_vwap_slope_for_short
+        self.min_vwap_slope_for_short = _imb_slope_short
+        # keep legacy attribute names for compatibility with existing callers
+        self.max_vwap_slope_for_short = _imb_slope_short
+        self.max_vwap_slope = _imb_slope_short
         self.min_vwap_slope_for_long = (
             float(min_vwap_slope_for_long)
             if min_vwap_slope_for_long is not None
-            else self.max_vwap_slope_for_short
+            else (
+                float(max_vwap_slope_for_long)
+                if max_vwap_slope_for_long is not None
+                else _imb_slope_short
+            )
+        )
+        # Rotational mode slope ceilings
+        self.max_vwap_slope_for_short_rot = (
+            float(max_vwap_slope_for_short_rot)
+            if max_vwap_slope_for_short_rot is not None
+            else None
+        )
+        self.max_vwap_slope_for_long_rot = (
+            float(max_vwap_slope_for_long_rot)
+            if max_vwap_slope_for_long_rot is not None
+            else None
         )
 
         _vwap = vwap if vwap is not None else pd.DataFrame()
@@ -313,9 +410,10 @@ class WeatherMarketImbalanceStrategy(Strategy):
         _low = low if low is not None else pd.DataFrame()
         _open = open_ if open_ is not None else pd.DataFrame() # open is a reserved keyword, so we use open_ in the signature and rename it here for indicator construction
 
-        # keep high/low on the instance for intrabar checks
+        # keep high/low/open on the instance for intrabar and rotational checks
         self._high = _high
         self._low = _low
+        self._open = _open
 
         _sd_bands = SdBands(
             pricing_method=pricing_method,
@@ -340,6 +438,8 @@ class WeatherMarketImbalanceStrategy(Strategy):
         needs_sd_bands = bool(self.use_market_regime or self.use_stop_loss or self.use_trailing_stop)
         if self.use_vwap_volume_imbalance_filter:
             needs_sd_bands = True
+        if self.market_regime_mode == "rotational":
+            needs_sd_bands = True
         needs_vwap = bool(
             self.use_vwap_slope_filter
             or self.use_vwap_volume_imbalance_filter
@@ -354,13 +454,22 @@ class WeatherMarketImbalanceStrategy(Strategy):
         _cum_buy_delta = None
         _cum_sell_delta = None
         if needs_cvd:
-            _cum_buy_delta = CumulativeYesNoDelta(volume_df=buy_volume, name="cum_buy_delta",
+            _cum_buy_delta = CumulativeYesNoDelta(
+                volume_df=buy_volume,
+                name="cum_buy_delta",
                 open_=_open,
                 high=_high,
                 low=_low,
                 dollar_weighted=True,
             )
-            _cum_sell_delta = CumulativeYesNoDelta(volume_df=sell_volume, name="cum_sell_delta")
+            _cum_sell_delta = CumulativeYesNoDelta(
+                volume_df=sell_volume,
+                name="cum_sell_delta",
+                open_=_open,
+                high=_high,
+                low=_low,
+                dollar_weighted=True,
+            )
             self.indicator_defs.extend([_cum_buy_delta, _cum_sell_delta])
             if self.use_buy_cvd_3sd_gate and _cum_buy_delta is not None:
                 self.indicator_defs.append(
@@ -463,6 +572,67 @@ class WeatherMarketImbalanceStrategy(Strategy):
         params.update(overrides)
         return cls(**params)
 
+    def _in_rotational_window(self, current_ts: pd.Timestamp) -> bool:
+        """Return True if *current_ts* is before the rotational cutoff.
+
+        Entries are allowed from t_0 until market_end_time − window_hours.
+        """
+        if self.market_end_time is None:
+            return False
+        cutoff = self.market_end_time - pd.Timedelta(hours=self.rotational_window_hours)
+        return current_ts <= cutoff
+
+    def _rotational_price_source(
+        self, index: int, asset: str, prices_row: pd.Series,
+        check_side: str = "upper",
+    ) -> float:
+        """Resolve the price used for ±Nsd band-touch checks.
+
+        When *rotational_price_source* is ``"highlow"``, the bar high is
+        returned for upper-band checks and the bar low for lower-band checks.
+        """
+        src = self.rotational_price_source
+        try:
+            if src == "close":
+                return float(prices_row.get(asset, float("nan")))
+            if src == "highlow":
+                if check_side == "upper":
+                    return float(self._high.iloc[index][asset])
+                return float(self._low.iloc[index][asset])
+            if src == "open":
+                return float(self._open.iloc[index][asset])
+        except Exception:
+            return float("nan")
+        return float("nan")
+
+    def _rotational_exit_target_index(self, entry_band: int, entry_side: str) -> int:
+        """Compute the exit-target band index for a rotational position.
+
+        Parameters
+        ----------
+        entry_band : int
+            Absolute band index at entry (positive for short at +Nsd,
+            positive for long at -Nsd where we store absolute value).
+        entry_side : str
+            "short" or "long".
+
+        Returns
+        -------
+        int
+            Band index in [-3, 3] used as the exit target.
+        """
+        offset = self.rotational_exit_offset
+        if offset == "mean":
+            return 0
+        offset_int = int(offset)
+        if entry_side == "short":
+            # Entered short at +entry_band; exit target moves toward mean.
+            target = entry_band - offset_int
+        else:
+            # Entered long at -entry_band; exit target moves toward mean.
+            target = -(entry_band - offset_int)
+        return int(max(-3, min(3, target)))
+
     def _classify_regime(self, asset: str) -> tuple[str, float]:
         indicators = getattr(self, "indicators", {})
 
@@ -547,8 +717,13 @@ class WeatherMarketImbalanceStrategy(Strategy):
 
     def _should_exit(self, asset: str, current_price: float, index: int, prices: pd.DataFrame) -> str | None:
         # Only skip exit checks when neither the exit_mode requests TP/SL
-        # nor the boolean gates are enabled in the profile.
-        if not (
+        # nor the boolean gates are enabled in the profile,
+        # AND no rotational exit target is stored on the position.
+        has_rotational_exit = (
+            asset in self._positions
+            and self._positions[asset].get("rotational_exit_target_index") is not None
+        )
+        if not has_rotational_exit and not (
             self.exit_mode == "take_profit_stop_loss"
             or getattr(self, "use_stop_loss", False)
             or getattr(self, "use_take_profit", False)
@@ -562,6 +737,39 @@ class WeatherMarketImbalanceStrategy(Strategy):
         if position is None:
             return None
         side = str(position.get("side", "short"))
+
+        # --- Rotational exit: dynamic band-based take-profit ---
+        be_target_idx = position.get("rotational_exit_target_index")
+        if be_target_idx is not None:
+            try:
+                ts = prices.index[index]
+                label = StopLossIndicator._label_for_band_index(int(cast(int, be_target_idx)))
+                band_val = self._sd_bands.band_value_at(asset, ts, label)
+                if band_val is not None and math.isfinite(band_val):
+                    if side == "short":
+                        # Check intrabar low, then close
+                        low_val = None
+                        try:
+                            if hasattr(self, "_low") and asset in self._low.columns:
+                                low_val = float(self._low.iloc[index][asset])
+                        except Exception:
+                            low_val = None
+                        check_val = low_val if (low_val is not None and np.isfinite(low_val)) else current_price
+                        if check_val <= band_val:
+                            return "rotational_tp"
+                    else:
+                        # Check intrabar high, then close
+                        high_val = None
+                        try:
+                            if hasattr(self, "_high") and asset in self._high.columns:
+                                high_val = float(self._high.iloc[index][asset])
+                        except Exception:
+                            high_val = None
+                        check_val = high_val if (high_val is not None and np.isfinite(high_val)) else current_price
+                        if check_val >= band_val:
+                            return "rotational_tp"
+            except Exception:
+                pass
 
         # Per-position TP/SL price checks (prefer absolute price thresholds)
         tp_price = position.get("tp_price", float("nan"))
@@ -693,6 +901,18 @@ class WeatherMarketImbalanceStrategy(Strategy):
                         fill_price = lo
         except Exception:
             pass
+        try:
+            if reason == "rotational_tp":
+                if side == "long" and hasattr(self, "_high") and asset in self._high.columns:
+                    hi = float(self._high.iloc[current_index][asset])
+                    if np.isfinite(hi) and hi > 0:
+                        fill_price = hi
+                if side == "short" and hasattr(self, "_low") and asset in self._low.columns:
+                    lo = float(self._low.iloc[current_index][asset])
+                    if np.isfinite(lo) and lo > 0:
+                        fill_price = lo
+        except Exception:
+            pass
 
         price_band_position_exit = self._price_band_position(
             prices=prices,
@@ -741,6 +961,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 "sell_cvd_band_position_exit": sell_cvd_band_position_exit,
                 "stop_price": stop_price,
                 "tp_price": tp_price,
+                "rotational_exit_target_index": position.get("rotational_exit_target_index"),
             }
         )
         self._positions.pop(asset, None)
@@ -904,12 +1125,37 @@ class WeatherMarketImbalanceStrategy(Strategy):
                     continue
                 regime, confidence = self._classify_regime(asset)
 
-                if regime == "Imb. Down":
-                    entry_side = "short"
-                elif regime == "Imb. Up":
-                    entry_side = "long"
+                if self.market_regime_mode == "rotational":
+                    # Rotational mode: only enter on rotational touch in
+                    # Balanced/Rotational regimes within the temporal window.
+                    if regime not in self.rotational_regimes:
+                        continue
+                    if not self._in_rotational_window(current_ts):
+                        continue
+                    ts = prices.index[index]
+                    upper_label = f"+{self.rotational_entry_band}sd"
+                    lower_label = f"-{self.rotational_entry_band}sd"
+                    upper_val = self._sd_bands.band_value_at(asset, ts, upper_label)
+                    lower_val = self._sd_bands.band_value_at(asset, ts, lower_label)
+                    upper_price = self._rotational_price_source(index, asset, prices_row, check_side="upper")
+                    lower_price = self._rotational_price_source(index, asset, prices_row, check_side="lower")
+                    if upper_val is not None and math.isfinite(upper_price) and upper_price >= upper_val:
+                        entry_side = "short"
+                    elif lower_val is not None and math.isfinite(lower_price) and lower_price <= lower_val:
+                        entry_side = "long"
+                    else:
+                        continue  # price not at extreme band
+                    entry_regime = f"BandExtreme: {regime}"
+                    # override regime variable for downstream position tagging
+                    regime = entry_regime
                 else:
-                    continue
+                    # Imbalance mode (default): Imb. Down -> short, Imb. Up -> long
+                    if regime == "Imb. Down":
+                        entry_side = "short"
+                    elif regime == "Imb. Up":
+                        entry_side = "long"
+                    else:
+                        continue
 
                 if entry_side == "long" and not self.allow_longs:
                     continue
@@ -935,24 +1181,48 @@ class WeatherMarketImbalanceStrategy(Strategy):
                     slope = 0.0
                 if not math.isfinite(raw_slope):
                     raw_slope = 0.0
-                if entry_side == "short":
-                    if slope > self.max_vwap_slope_for_short:
-                        continue
+                if self.market_regime_mode == "rotational":
+                    # Rotational: max thresholds cap how extreme slope can be
+                    if entry_side == "short":
+                        rot_thr = self.max_vwap_slope_for_short_rot
+                        if rot_thr is not None and slope > rot_thr:
+                            continue
+                    else:
+                        rot_thr = self.max_vwap_slope_for_long_rot
+                        if rot_thr is not None and slope < rot_thr:
+                            continue
                 else:
-                    if slope < self.min_vwap_slope_for_long:
-                        continue
+                    # Imbalance: min thresholds require sufficient trend extremity
+                    if entry_side == "short":
+                        if slope > self.min_vwap_slope_for_short:
+                            continue
+                    else:
+                        if slope < self.min_vwap_slope_for_long:
+                            continue
 
             imbalance_pct = float("nan")
             if self.use_vwap_volume_imbalance_filter:
                 imbalance_pct = _indicator_asset_value(vwap_imbalance_values, asset)
                 if np.isnan(imbalance_pct):
                     continue
-                if entry_side == "short":
-                    if imbalance_pct > self.max_vwap_volume_imbalance_pct_for_short:
-                        continue
+                if self.market_regime_mode == "rotational":
+                    # Rotational: max thresholds cap how extreme imbalance can be
+                    if entry_side == "short":
+                        rot_thr = self.max_vwap_volume_imbalance_pct_for_short_rot
+                        if rot_thr is not None and imbalance_pct > rot_thr:
+                            continue
+                    else:
+                        rot_thr = self.max_vwap_volume_imbalance_pct_for_long_rot
+                        if rot_thr is not None and imbalance_pct < rot_thr:
+                            continue
                 else:
-                    if imbalance_pct < self.min_vwap_volume_imbalance_pct_for_long:
-                        continue
+                    # Imbalance: min thresholds require sufficient extremity
+                    if entry_side == "short":
+                        if imbalance_pct > self.min_vwap_volume_imbalance_pct_for_short:
+                            continue
+                    else:
+                        if imbalance_pct < self.min_vwap_volume_imbalance_pct_for_long:
+                            continue
 
             if self.use_buy_cvd_3sd_gate:
                 buy_band_idx = self._cvd_band_position(
@@ -1161,7 +1431,16 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 ),
                 "stop_price": stop_price,
                 "tp_price": tp_price,
+                "rotational_exit_target_index": None,
             }
+
+            # Compute rotational exit target for rotational entries
+            if str(entry_regime).startswith("BandExtreme:"):
+                be_exit_idx = self._rotational_exit_target_index(
+                    entry_band=self.rotational_entry_band,
+                    entry_side=entry_side,
+                )
+                self._positions[asset]["rotational_exit_target_index"] = be_exit_idx
 
         # Build side-aware weight vector
         weights = np.zeros(len(assets), dtype=float)
