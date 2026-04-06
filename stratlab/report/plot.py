@@ -1624,9 +1624,13 @@ def draw_vwap_slope_panel(
     finite_vals = slope_vals[np.isfinite(slope_vals)]
     abs_nonzero = np.abs(finite_vals[np.abs(finite_vals) > 0.0]) if len(finite_vals) else np.array([])
     if len(abs_nonzero) > 0:
-        linthresh = float(np.nanpercentile(abs_nonzero, 35))
-        linthresh = max(linthresh, 1e-6)
-        ax.set_yscale("symlog", linthresh=linthresh, linscale=1.0)
+        # Use a larger percentile and a slightly bigger minimum threshold so
+        # the symlog linear region around 0 is wider and small slopes
+        # (e.g. ±1e-1) are more readable. Increase linscale to emphasize
+        # the linear region visually.
+        linthresh = float(np.nanpercentile(abs_nonzero, 60))
+        linthresh = max(linthresh, 1e-3)
+        ax.set_yscale("symlog", linthresh=linthresh, linscale=1.5)
 
     if len(finite_vals) >= 8:
         lo = float(np.nanpercentile(finite_vals, 2.0))

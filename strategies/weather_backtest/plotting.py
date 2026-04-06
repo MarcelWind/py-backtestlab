@@ -446,12 +446,13 @@ def _draw_vwap_slope_row(
     
     draw_vwap_slope_panel(
         ax, slope_series,
-        entry_times=entry_times, entry_values=entry_vals,
         signal_times=signal_times, signal_values=signal_vals,
         threshold=max_vwap_slope,
         mode_label=mode_lbl, lookback_label=lb_lbl, update_pct=upd_pct,
         magnitude_threshold=magnitude_threshold,
     )
+    # Overlay side-aware entry markers (long => up, short => down)
+    _overlay_entry_markers(ax, market_trades, slope_series, zorder=8)
     ax.set_xlim(xlim)
 
 
@@ -659,7 +660,7 @@ def plot_entries_exits(
 
     cols = 2
     rows = (len(markets) + cols - 1) // cols
-    _PANEL_RATIOS = [3, 2.0, 2.0, 0.9, 1.2, 1.2]
+    _PANEL_RATIOS = [3, 2.0, 2.0, 0.9, 2.2, 1.2]
     _SPACER_RATIO = 0.6  # blank row between market groups; absorbs x-tick labels + next title
     # stride: number of figure rows per market group (6 panels + 1 spacer, except last group)
     stride = 7 if rows > 1 else 6

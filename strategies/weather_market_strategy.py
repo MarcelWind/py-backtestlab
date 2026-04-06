@@ -1172,6 +1172,21 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 if entry_side == "short" and not self.allow_shorts:
                     continue
 
+            # --- Rotational price-vs-mean gate ---
+            # In rotational mode only allow shorts above mean, longs below mean.
+            if self.market_regime_mode == "rotational" and hasattr(self, "_sd_bands"):
+                try:
+                    _mean_val = self._sd_bands.band_value_at(asset, prices.index[index], "mean")
+                    if _mean_val is not None and math.isfinite(_mean_val):
+                        _cur_price = float(prices_row.get(asset, float("nan")))
+                        if math.isfinite(_cur_price):
+                            if entry_side == "short" and _cur_price < _mean_val:
+                                continue
+                            if entry_side == "long" and _cur_price > _mean_val:
+                                continue
+                except Exception:
+                    pass
+
             slope = 0.0
             raw_slope = 0.0
             if self.use_vwap_slope_filter:
@@ -1182,14 +1197,18 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 if not math.isfinite(raw_slope):
                     raw_slope = 0.0
                 if self.market_regime_mode == "rotational":
-                    # Rotational: max thresholds cap how extreme slope can be
+                    # Rotational: slope must confirm mean-reversion direction.
+                    # Shorts expect price rising (positive slope) into resistance;
+                    # skip if slope is below threshold (too bearish).
+                    # Longs expect price falling (negative slope) into support;
+                    # skip if slope is above threshold (too bullish).
                     if entry_side == "short":
                         rot_thr = self.max_vwap_slope_for_short_rot
-                        if rot_thr is not None and slope > rot_thr:
+                        if rot_thr is not None and slope < rot_thr:
                             continue
                     else:
                         rot_thr = self.max_vwap_slope_for_long_rot
-                        if rot_thr is not None and slope < rot_thr:
+                        if rot_thr is not None and slope > rot_thr:
                             continue
                 else:
                     # Imbalance: min thresholds require sufficient trend extremity
@@ -1206,14 +1225,17 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 if np.isnan(imbalance_pct):
                     continue
                 if self.market_regime_mode == "rotational":
-                    # Rotational: max thresholds cap how extreme imbalance can be
+                    # Rotational: volume imbalance must confirm mean-reversion.
+                    # Shorts: skip if imbalance too negative (sell-side heavy,
+                    # trend continuation rather than reversion).
+                    # Longs: skip if imbalance too positive.
                     if entry_side == "short":
                         rot_thr = self.max_vwap_volume_imbalance_pct_for_short_rot
-                        if rot_thr is not None and imbalance_pct > rot_thr:
+                        if rot_thr is not None and imbalance_pct < rot_thr:
                             continue
                     else:
                         rot_thr = self.max_vwap_volume_imbalance_pct_for_long_rot
-                        if rot_thr is not None and imbalance_pct < rot_thr:
+                        if rot_thr is not None and imbalance_pct > rot_thr:
                             continue
                 else:
                     # Imbalance: min thresholds require sufficient extremity
@@ -1335,6 +1357,21 @@ class WeatherMarketImbalanceStrategy(Strategy):
             if asset in self._positions:
                 continue
             entry_price = float(prices_row.get(asset, float("nan")))
+            # For rotational (band-touch) entries fill at the band value,
+            # not the bar close.  The bar's high/low touched the band intrabar
+            # so the earliest realistic fill is at the band level itself.
+            if str(entry_regime).startswith("BandExtreme:"):
+                try:
+                    _ts_entry = prices.index[index]
+                    if entry_side == "short":
+                        _fill_label = f"+{self.rotational_entry_band}sd"
+                    else:
+                        _fill_label = f"-{self.rotational_entry_band}sd"
+                    _band_fill = self._sd_bands.band_value_at(asset, _ts_entry, _fill_label)
+                    if _band_fill is not None and math.isfinite(_band_fill) and _band_fill > 0:
+                        entry_price = float(_band_fill)
+                except Exception:
+                    pass
             if np.isnan(entry_price) or entry_price <= 0:
                 continue
             # Enforce min/max price guards to avoid re-entries at near-zero prices
