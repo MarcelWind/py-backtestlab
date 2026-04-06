@@ -44,7 +44,7 @@ def classify_regime(
     shape = above_mean_pct.shape
 
     regime = np.zeros(shape, dtype=np.int8)
-    confidence = np.zeros(shape, dtype=np.float64)
+    confidence = np.zeros(shape, dtype=np.float32)
 
     # Imb. Up
     imb_up = (
@@ -282,11 +282,11 @@ def compute_weights(
     weights : float (n_perms, n_bars, n_assets)
         Equal-weight among active positions, signed by side.
     """
-    active = (position_side != 0).astype(np.float64)
+    active = (position_side != 0).astype(np.float32)
     n_active = active.sum(axis=2, keepdims=True)  # (n_p, n_b, 1)
     safe_n = np.maximum(n_active, 1.0)
     unit_weight = 1.0 / safe_n
-    return position_side.astype(np.float64) * unit_weight
+    return position_side.astype(np.float32) * unit_weight
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +312,7 @@ def portfolio_returns(
     """
     port = np.nansum(weights * returns, axis=2)  # (n_perms, n_bars)
     port[:, :lookback] = 0.0
-    return port
+    return port.astype(np.float32)
 
 
 # ---------------------------------------------------------------------------

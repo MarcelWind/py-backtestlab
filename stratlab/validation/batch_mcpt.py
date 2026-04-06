@@ -15,20 +15,32 @@ vectorized engine does not yet support (e.g., TP/SL exits, trailing stop).
 from __future__ import annotations
 
 import gc
+import platform
 import time
 from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
 
-from .bar_permute import permute_event_bars
+
+def _rss_mb() -> float:
+    """Return current process RSS in MB (Linux/macOS)."""
+    try:
+        import resource
+        # macOS reports in bytes, Linux in KB
+        rusage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if platform.system() == "Darwin":
+            return rusage / (1024 * 1024)
+        return rusage / 1024
+    except Exception:
+        return 0.0
+
 from .batch_permute import BatchPermutedEvent, batch_permute_event
 from .mcpt import (
     MCPTResult,
     SubmarketMCPT,
     EventLevelMCPTStrategy,
     ScoringFn,
-    aggregate_market_returns,
     concat_returns_in_order,
     profit_factor,
     _apply_event_strategy_to_events,
@@ -105,22 +117,6 @@ def _build_indicator_params(params: dict) -> dict:
     }
 
 
-def _score_array(
-    port_returns_2d: np.ndarray,
-    scoring_fn: Callable[[pd.Series], float],
-) -> np.ndarray:
-    """Score each row of a (n_perms, n_bars) returns array.
-
-    Falls back to per-row scoring via the existing scoring_fn.
-    """
-    n_perms = port_returns_2d.shape[0]
-    scores = np.empty(n_perms, dtype=np.float64)
-    for i in range(n_perms):
-        s = pd.Series(port_returns_2d[i][np.isfinite(port_returns_2d[i])])
-        scores[i] = scoring_fn(s)
-    return scores
-
-
 def run_batch_mcpt(
     strategy: EventLevelMCPTStrategy,
     events: dict[str, dict[str, pd.DataFrame]],
@@ -171,22 +167,30 @@ def run_batch_mcpt(
     if verbose:
         log_fn(f"[{label}] real score={real_pf:.6f}, starting {total_perms} batch permutations")
 
-    # --- Batch permutation per event ----------------------------------------
-    # Accumulate per-permutation cohort returns across events.
-    # Shape: (total_perms, max_bars_across_events) — but events differ in length,
-    # so we must concatenate per-perm.
-    perm_event_scores_by_perm: list[list[tuple[str, pd.Series]]] = [
-        [] for _ in range(total_perms)
-    ]
+    # --- Pre-compute total bar count for compact accumulator ----------------
+    event_bar_counts: dict[str, int] = {}
+    for slug in event_order:
+        event_data = events[slug]
+        if not event_data:
+            event_bar_counts[slug] = 0
+            continue
+        first_key = next(iter(event_data))
+        n_bars = len(event_data[first_key])
+        event_bar_counts[slug] = n_bars
+    total_bars = sum(event_bar_counts.values())
 
-    # Per-submarket accumulators
+    # Pre-allocated compact accumulator: (total_perms, total_bars) float32.
+    # Each event fills its slice in-place; NaN marks unused slots.
+    perm_cohort_rets = np.full(
+        (total_perms, total_bars), np.nan, dtype=np.float32,
+    )
+    bar_offset = 0
+
+    # Per-submarket accumulators — only float scores (not full Series)
     def _submarket_keys(slug: str) -> list[str]:
         return list(real_mkt_rets[slug].keys())
 
     perm_mkt_pfs: dict[str, dict[str, list[float]]] = {
-        slug: {col: [] for col in _submarket_keys(slug)} for slug in event_order
-    }
-    perm_mkt_rets: dict[str, dict[str, list[pd.Series]]] = {
         slug: {col: [] for col in _submarket_keys(slug)} for slug in event_order
     }
 
@@ -200,6 +204,7 @@ def run_batch_mcpt(
         event_data = events[slug]
         prices, returns, vwap, volume, high, low, open_, buy_vol, sell_vol = _reconstruct_matrices(event_data)
         if prices.empty or len(prices) < 3:
+            bar_offset += event_bar_counts.get(slug, 0)
             continue
 
         assets = prices.columns.tolist()
@@ -219,6 +224,9 @@ def run_batch_mcpt(
             seed_offset=1,
         )
 
+        # Free reconstructed matrices — data now lives in bp arrays
+        del prices, returns, vwap, volume, high, low, open_, buy_vol, sell_vol
+
         # Compute all indicators on permuted data
         indicators = compute_all_indicators(
             bp.close,
@@ -235,27 +243,33 @@ def run_batch_mcpt(
 
         # Compute batch strategy returns
         port_rets_2d = batch_strategy_returns(indicators, bp.returns, strat_params)
-        # port_rets_2d: (total_perms, n_bars)
+        # port_rets_2d: (total_perms, n_bars) float32
 
-        # For per-submarket tracking, the vectorized path returns portfolio-level
-        # returns only. We store them under the "_portfolio_" key.
+        # Free heavy temporaries before accumulating results
+        del bp, indicators
+
+        # Fill compact accumulator in-place (no pd.Series objects created)
+        perm_cohort_rets[:, bar_offset:bar_offset + n_bars] = port_rets_2d
+
+        # Per-submarket scores (floats only — no Series stored)
         for pi in range(total_perms):
-            rets_ser = pd.Series(
-                port_rets_2d[pi][np.isfinite(port_rets_2d[pi])],
-                dtype=np.float64,
-            )
-            perm_event_scores_by_perm[pi].append((slug, rets_ser))
-
-            # Store as portfolio-level market returns
-            for col in _submarket_keys(slug):
-                perm_mkt_rets[slug][col].append(rets_ser)
-                mpf = scoring_fn(rets_ser)
-                if np.isfinite(mpf):
+            finite_mask = np.isfinite(port_rets_2d[pi])
+            rets_arr = port_rets_2d[pi][finite_mask]
+            mpf = scoring_fn(pd.Series(rets_arr, dtype=np.float64))
+            if np.isfinite(mpf):
+                for col in _submarket_keys(slug):
                     perm_mkt_pfs[slug][col].append(float(mpf))
+
+        del port_rets_2d
+        bar_offset += n_bars
 
         if verbose:
             elapsed = time.monotonic() - t0
-            log_fn(f"[{label}] event {slug}: batch done ({elapsed:.1f}s elapsed)")
+            rss = _rss_mb()
+            log_fn(
+                f"[{label}] event {slug}: batch done "
+                f"({elapsed:.1f}s elapsed, RSS={rss:.0f}MB)"
+            )
 
         gc.collect()
 
@@ -264,12 +278,9 @@ def run_batch_mcpt(
     perm_better_count = 1
 
     for pi in range(total_perms):
-        # Build cohort returns by concatenating event returns for this perm
-        perm_rets_by_event: dict[str, pd.Series] = {}
-        for slug, rets_ser in perm_event_scores_by_perm[pi]:
-            perm_rets_by_event[slug] = rets_ser
-
-        cohort = concat_returns_in_order(perm_rets_by_event, event_order)
+        row = perm_cohort_rets[pi]
+        finite_mask = np.isfinite(row)
+        cohort = pd.Series(row[finite_mask].astype(np.float64))
         pf = scoring_fn(cohort)
         if np.isfinite(pf):
             permuted_pfs.append(float(pf))
@@ -279,6 +290,10 @@ def run_batch_mcpt(
         if verbose and (pi + 1 == 1 or (pi + 1) % 10 == 0 or pi + 1 == total_perms):
             running_p = perm_better_count / (pi + 2)  # +2: 1-indexed + real
             log_fn(f"[{label}] scored {pi + 1}/{total_perms}: p={running_p:.4f}")
+
+    # Free the large accumulator now that scoring is done
+    del perm_cohort_rets
+    gc.collect()
 
     p_value = float(perm_better_count / n_permutations)
 
@@ -296,7 +311,7 @@ def run_batch_mcpt(
                 p_value=sm_p,
                 permuted_pfs=perm_list,
                 real_returns=real_mkt_rets[slug][col],
-                permuted_returns=perm_mkt_rets[slug][col],
+                permuted_returns=[],  # omitted in batch mode to save memory
             )
 
     if verbose:

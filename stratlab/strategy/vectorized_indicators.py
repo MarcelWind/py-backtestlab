@@ -52,14 +52,17 @@ def sd_bands_expanding(
     mean : (n_perms, n_bars, n_assets)
     std  : (n_perms, n_bars, n_assets)
     """
-    cumsum = np.nancumsum(prices, axis=1)
-    cumsum_sq = np.nancumsum(prices ** 2, axis=1)
-    counts = np.nancumsum(np.isfinite(prices).astype(np.float64), axis=1)
+    # Use float64 for cumulative sums to avoid precision loss over many bars,
+    # then cast the result back to float32 to halve downstream memory.
+    prices_f64 = prices.astype(np.float64) if prices.dtype != np.float64 else prices
+    cumsum = np.nancumsum(prices_f64, axis=1)
+    cumsum_sq = np.nancumsum(prices_f64 ** 2, axis=1)
+    counts = np.nancumsum(np.isfinite(prices_f64).astype(np.float64), axis=1)
     counts = np.maximum(counts, 1.0)  # avoid division by zero
 
-    mean = cumsum / counts
-    var = np.maximum(cumsum_sq / counts - mean ** 2, 0.0)
-    std = np.sqrt(var)
+    mean = (cumsum / counts).astype(np.float32)
+    var = np.maximum(cumsum_sq / counts - (cumsum / counts) ** 2, 0.0)
+    std = np.sqrt(var).astype(np.float32)
     return mean, std
 
 
@@ -153,12 +156,13 @@ def cumulative_delta_stats(
     mean : (n_perms, n_bars, n_assets)
     std  : (n_perms, n_bars, n_assets)
     """
-    cumsum = np.cumsum(delta, axis=1)
-    cumsum_sq = np.cumsum(delta ** 2, axis=1)
+    delta_f64 = delta.astype(np.float64) if delta.dtype != np.float64 else delta
+    cumsum = np.cumsum(delta_f64, axis=1)
+    cumsum_sq = np.cumsum(delta_f64 ** 2, axis=1)
     counts = np.arange(1, delta.shape[1] + 1, dtype=np.float64).reshape(1, -1, 1)
-    mean = cumsum / counts
-    var = np.maximum(cumsum_sq / counts - mean ** 2, 0.0)
-    std = np.sqrt(var)
+    mean = (cumsum / counts).astype(np.float32)
+    var = np.maximum(cumsum_sq / counts - (cumsum / counts) ** 2, 0.0)
+    std = np.sqrt(var).astype(np.float32)
     return mean, std
 
 
@@ -187,11 +191,11 @@ def band_position(
     within_1sd_pct``, each (n_perms, n_bars, n_assets).
     """
     valid = np.isfinite(prices) & np.isfinite(mean)
-    above_mean = (valid & (prices > mean)).astype(np.float64)
-    above_1sd = (valid & (prices > plus_1sd)).astype(np.float64)
-    below_m1sd = (valid & (prices < minus_1sd)).astype(np.float64)
-    within_1sd = (valid & (prices >= minus_1sd) & (prices <= plus_1sd)).astype(np.float64)
-    valid_f = valid.astype(np.float64)
+    above_mean = (valid & (prices > mean)).astype(np.float32)
+    above_1sd = (valid & (prices > plus_1sd)).astype(np.float32)
+    below_m1sd = (valid & (prices < minus_1sd)).astype(np.float32)
+    within_1sd = (valid & (prices >= minus_1sd) & (prices <= plus_1sd)).astype(np.float32)
+    valid_f = valid.astype(np.float32)
 
     def _rolling_sum(arr: np.ndarray) -> np.ndarray:
         cs = np.cumsum(arr, axis=1)
@@ -235,7 +239,7 @@ def mean_reversion(
 
     # Compute rolling mean via cumsum trick
     cs = np.nancumsum(prices, axis=1)
-    counts = np.nancumsum(np.isfinite(prices).astype(np.float64), axis=1)
+    counts = np.nancumsum(np.isfinite(prices).astype(np.float32), axis=1)
     safe_counts = np.maximum(counts, 1.0)
     # For bars < window, use expanding mean; else rolling mean
     roll_mean = np.empty_like(prices)
@@ -259,9 +263,9 @@ def mean_reversion(
     prev_valid = valid[:, :-1, :]
     cur_valid = valid[:, 1:, :]
     sign_changed = signs[:, 1:, :] != signs[:, :-1, :]
-    change[:, 1:, :] = (prev_valid & cur_valid & sign_changed).astype(np.float64)
+    change[:, 1:, :] = (prev_valid & cur_valid & sign_changed).astype(np.float32)
 
-    valid_f = valid.astype(np.float64)
+    valid_f = valid.astype(np.float32)
 
     # Rolling sums over lookback_bars
     def _rolling_sum(arr: np.ndarray) -> np.ndarray:
@@ -314,7 +318,7 @@ def vwap_slope(
     #   slope = (n*Σxy - Σx*Σy) / (n*Σx² - (Σx)²)
     # where x = bar offset within window, y = vwap value
 
-    slopes = np.zeros((n_p, n_b, n_a), dtype=np.float64)
+    slopes = np.zeros((n_p, n_b, n_a), dtype=np.float32)
 
     # For each bar b, the window is [max(0, b-lookback+1), b].
     # We compute this with a simple loop over bars — still vectorized over
@@ -326,7 +330,7 @@ def vwap_slope(
             continue
 
         y_win = vwap[:, start:b + 1, :]  # (n_p, w, n_a)
-        x = np.arange(w, dtype=np.float64)  # (w,)
+        x = np.arange(w, dtype=np.float32)  # (w,)
 
         if volume is not None:
             v_win = volume[:, start:b + 1, :]
@@ -336,8 +340,8 @@ def vwap_slope(
 
         # Masked regression: set invalid entries to 0 contribution
         y_masked = np.where(valid, y_win, 0.0)
-        x_3d = x.reshape(1, -1, 1) * valid.astype(np.float64)
-        n_valid = valid.astype(np.float64).sum(axis=1)  # (n_p, n_a)
+        x_3d = x.reshape(1, -1, 1) * valid.astype(np.float32)
+        n_valid = valid.astype(np.float32).sum(axis=1)  # (n_p, n_a)
 
         sx = x_3d.sum(axis=1)         # (n_p, n_a)
         sy = y_masked.sum(axis=1)     # (n_p, n_a)

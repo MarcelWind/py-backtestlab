@@ -1137,6 +1137,9 @@ class WeatherMarketImbalanceStrategy(Strategy):
                     lower_label = f"-{self.rotational_entry_band}sd"
                     upper_val = self._sd_bands.band_value_at(asset, ts, upper_label)
                     lower_val = self._sd_bands.band_value_at(asset, ts, lower_label)
+                    # Pre-fetch mean for the price-vs-mean gate (avoids
+                    # a redundant O(log n) bisect lookup later).
+                    _rot_mean_val = self._sd_bands.band_value_at(asset, ts, "mean")
                     upper_price = self._rotational_price_source(index, asset, prices_row, check_side="upper")
                     lower_price = self._rotational_price_source(index, asset, prices_row, check_side="lower")
                     if upper_val is not None and math.isfinite(upper_price) and upper_price >= upper_val:
@@ -1176,7 +1179,9 @@ class WeatherMarketImbalanceStrategy(Strategy):
             # In rotational mode only allow shorts above mean, longs below mean.
             if self.market_regime_mode == "rotational" and hasattr(self, "_sd_bands"):
                 try:
-                    _mean_val = self._sd_bands.band_value_at(asset, prices.index[index], "mean")
+                    # Reuse the mean value fetched during the rotational
+                    # band-touch check above to avoid a redundant lookup.
+                    _mean_val = _rot_mean_val  # type: ignore[possibly-undefined]
                     if _mean_val is not None and math.isfinite(_mean_val):
                         _cur_price = float(prices_row.get(asset, float("nan")))
                         if math.isfinite(_cur_price):

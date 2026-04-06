@@ -70,7 +70,7 @@ def _df_to_array(df: pd.DataFrame | None, assets: list[str]) -> np.ndarray | Non
     if df is None or df.empty:
         return None
     aligned = df.reindex(columns=assets, fill_value=np.nan)
-    return aligned.to_numpy(dtype=np.float64)
+    return aligned.to_numpy(dtype=np.float32)
 
 
 def _permute_3d(
@@ -148,7 +148,7 @@ def batch_permute_event(
 
     perm_indices = generate_permutation_indices(n_bars, n_perms, seed_offset)
 
-    close_2d = prices.to_numpy(dtype=np.float64)
+    close_2d = prices.to_numpy(dtype=np.float32)
     close_3d = _permute_3d(close_2d, perm_indices)
 
     high_3d = _permute_3d(_df_to_array(high, assets), perm_indices) if high is not None else None
@@ -170,10 +170,10 @@ def batch_permute_event(
                 cols.append(None)  # type: ignore[arg-type]
         if all(c is None for c in cols):
             return None
-        arr = np.full((n_bars, len(assets)), np.nan, dtype=np.float64)
+        arr = np.full((n_bars, len(assets)), np.nan, dtype=np.float32)
         for j, c in enumerate(cols):
             if c is not None and c in vol_df.columns:
-                arr[:, j] = vol_df[c].to_numpy(dtype=np.float64)
+                arr[:, j] = vol_df[c].to_numpy(dtype=np.float32)
         return _permute_3d(arr, perm_indices)
 
     bv_yes = _resolve_yesno(buy_volume, "yes")
