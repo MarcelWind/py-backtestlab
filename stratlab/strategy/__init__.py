@@ -9,7 +9,7 @@ from .indicators import (
     SdBands,
     Vwap,
     VwapSlope,
-    VwapVolumeImbalance,
+    VolumeImbalance,
     RegimeClassification,
     sd_bands_expanding,
     market_regimes,

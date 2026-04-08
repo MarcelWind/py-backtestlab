@@ -11,14 +11,14 @@ class MyStrategy(Strategy):
     indicator_defs = [
         _sd,
         VwapSlope(vwap=vwap_df, volume=vol_df, lookback=30),
-        VwapVolumeImbalance(volume=vol_df, sd_bands=_sd, lookback=60),
+        VolumeImbalance(volume=vol_df, sd_bands=_sd),
         BandPosition(lookback_hours=6.0),
     ]
 
     def generate_weights(self, prices, returns, index):
-        slope    = self.indicators["vwap_slope"]           # pd.Series (per asset)
-        imbalance= self.indicators["vwap_volume_imbalance"] # pd.Series (per asset)
-        bands    = self.indicators["band_position"]         # pd.DataFrame (stats x assets)
+        slope    = self.indicators["vwap_slope"]     # pd.Series (per asset)
+        imbalance= self.indicators["volume_imbalance"] # pd.Series (per asset)
+        bands    = self.indicators["band_position"]  # pd.DataFrame (stats x assets)
         ...
 """
 
@@ -720,12 +720,13 @@ class VwapSlope(Indicator):
 
 
 # ---------------------------------------------------------------------------
-# VwapVolumeImbalance
+# VolumeImbalance
 # ---------------------------------------------------------------------------
 
-class VwapVolumeImbalance(Indicator):
-    """Rolling (above-mean volume − below/equal-mean volume) / total × 100.
+class VolumeImbalance(Indicator):
+    """Session-cumulative (above-mean volume − below/equal-mean volume) / total × 100.
 
+    Accumulates from bar 0 of the session; no rolling lookback window is used.
     Returns a ``pd.Series`` indexed by asset name. Assets with insufficient
     data receive ``float("nan")``.
 
@@ -736,30 +737,26 @@ class VwapVolumeImbalance(Indicator):
     sd_bands:
         ``SdBands`` indicator instance used as the baseline source. The
         indicator compares price against the expanding ``mean`` band at each
-        bar in the lookback window.
-    lookback:
-        Rolling window size in bars for the volume sums.
+        bar.
     """
 
     def __init__(
         self,
         volume: pd.DataFrame = pd.DataFrame(),
         sd_bands: "SdBands | None" = None,
-        lookback: int = 30,
-        name: str = "vwap_volume_imbalance",
+        name: str = "volume_imbalance",
         plot_panel: int | None = 1,
     ) -> None:
         if sd_bands is None:
-            raise ValueError("VwapVolumeImbalance requires sd_bands")
+            raise ValueError("VolumeImbalance requires sd_bands")
         self._volume = volume
         self.sd_bands = sd_bands
-        self.lookback = int(lookback)
         self._indicator_name = name
         self._plot_panel = plot_panel
         self._next_bar: int = -1
-        # Running cumulative sums so window sums can be obtained in O(1).
-        self._cum_above: dict[str, list[float]] = {}
-        self._cum_below: dict[str, list[float]] = {}
+        # Session-cumulative running sums (scalar per asset, no list history needed).
+        self._cum_above: dict[str, float] = {}
+        self._cum_below: dict[str, float] = {}
         self._last_ratio: dict[str, float] = {}
 
     @property
@@ -768,15 +765,14 @@ class VwapVolumeImbalance(Indicator):
 
     def _process_bar(self, prices: pd.DataFrame, i: int) -> None:
         ts = prices.index[i]
-        lookback = max(3, self.lookback)
 
         for asset in prices.columns:
-            prev_above = self._cum_above.get(asset, [0.0])[-1] if self._cum_above.get(asset) else 0.0
-            prev_below = self._cum_below.get(asset, [0.0])[-1] if self._cum_below.get(asset) else 0.0
+            prev_above = self._cum_above.get(asset, 0.0)
+            prev_below = self._cum_below.get(asset, 0.0)
 
             if asset not in self._volume.columns:
-                self._cum_above.setdefault(asset, []).append(prev_above)
-                self._cum_below.setdefault(asset, []).append(prev_below)
+                self._cum_above[asset] = prev_above
+                self._cum_below[asset] = prev_below
                 self._last_ratio[asset] = float("nan")
                 continue
 
@@ -802,22 +798,12 @@ class VwapVolumeImbalance(Indicator):
 
             cur_above = prev_above + above
             cur_below = prev_below + below
-            above_hist = self._cum_above.setdefault(asset, [])
-            below_hist = self._cum_below.setdefault(asset, [])
-            above_hist.append(cur_above)
-            below_hist.append(cur_below)
+            self._cum_above[asset] = cur_above
+            self._cum_below[asset] = cur_below
 
-            start_minus_one = i - lookback
-            if start_minus_one >= 0 and start_minus_one < len(above_hist):
-                win_above = cur_above - above_hist[start_minus_one]
-                win_below = cur_below - below_hist[start_minus_one]
-            else:
-                win_above = cur_above
-                win_below = cur_below
-
-            total = win_above + win_below
+            total = cur_above + cur_below
             if total > 0.0:
-                self._last_ratio[asset] = float((win_above - win_below) / total * 100.0)
+                self._last_ratio[asset] = float((cur_above - cur_below) / total * 100.0)
             else:
                 self._last_ratio[asset] = float("nan")
 

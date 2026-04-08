@@ -13,7 +13,7 @@ from stratlab.strategy.indicators import (
     SdBands,
     Vwap,
     VwapSlope,
-    VwapVolumeImbalance,
+    VolumeImbalance,
     CumulativeYesNoDelta,
     CvdSdThreshold,
     StopLossIndicator,
@@ -74,11 +74,10 @@ class WeatherMarketImbalanceStrategy(Strategy):
         balanced_within_1sd_threshold: float = 70.0,
         mean_reversion_threshold: float = 0.5,
         use_vwap_slope_filter: bool = True,
-        use_vwap_volume_imbalance_filter: bool = True,
-        max_vwap_volume_imbalance_pct: float = -1.0,
-        max_vwap_volume_imbalance_pct_for_short: float | None = None,
-        min_vwap_volume_imbalance_pct_for_long: float | None = None,
-        vwap_volume_imbalance_lookback: int | None = None,
+        use_volume_imbalance_filter: bool = True,
+        max_volume_imbalance_pct: float = -1.0,
+        max_volume_imbalance_pct_for_short: float | None = None,
+        min_volume_imbalance_pct_for_long: float | None = None,
         vwap: pd.DataFrame | None = None,
         volume: pd.DataFrame | None = None,
         high: pd.DataFrame | None = None,
@@ -129,13 +128,13 @@ class WeatherMarketImbalanceStrategy(Strategy):
         # "min" semantics: "minimum -1.0 or lower" — slope/imbalance must be
         # at least this extreme to confirm the imbalance trend.
         min_vwap_slope_for_short: float | None = None,
-        min_vwap_volume_imbalance_pct_for_short: float | None = None,
+        min_volume_imbalance_pct_for_short: float | None = None,
         # Rotational-mode slope/volume ceilings.
         # "max" semantics: slope/imbalance must not exceed this value,
         # preventing entries when conditions suggest imbalance rather than rotation.
         max_vwap_slope_for_long: float | None = None,
-        max_vwap_volume_imbalance_pct_for_short_rot: float | None = None,
-        max_vwap_volume_imbalance_pct_for_long_rot: float | None = None,
+        max_volume_imbalance_pct_for_short_rot: float | None = None,
+        max_volume_imbalance_pct_for_long_rot: float | None = None,
         max_vwap_slope_for_short_rot: float | None = None,
         max_vwap_slope_for_long_rot: float | None = None,
     ):
@@ -164,13 +163,11 @@ class WeatherMarketImbalanceStrategy(Strategy):
         - max_vwap_slope: Backward-compatible alias for short slope ceiling.
         - min_vwap_slope_for_long: Long-entry slope floor (entry requires slope >= this value).
             If None, falls back to short slope ceiling for backward compatibility.
-        - use_vwap_volume_imbalance_filter: Enables VWAP volume-imbalance gate.
-        - max_vwap_volume_imbalance_pct_for_short: Short-entry imbalance ceiling.
-        - max_vwap_volume_imbalance_pct: Backward-compatible alias for short imbalance ceiling.
-        - min_vwap_volume_imbalance_pct_for_long: Long-entry imbalance floor.
+        - use_volume_imbalance_filter: Enables volume-imbalance gate.
+        - max_volume_imbalance_pct_for_short: Short-entry imbalance ceiling.
+        - max_volume_imbalance_pct: Backward-compatible alias for short imbalance ceiling.
+        - min_volume_imbalance_pct_for_long: Long-entry imbalance floor.
             If None, falls back to short imbalance ceiling for backward compatibility.
-        - vwap_volume_imbalance_lookback: Lookback in UPDATE BARS for imbalance.
-            If None, uses vwap_slope_lookback.
 
         Buy-volume delta filter:
         - buy_volume: optional DataFrame containing per-bar "yes" and "no"
@@ -324,37 +321,36 @@ class WeatherMarketImbalanceStrategy(Strategy):
         )
 
         self.use_vwap_slope_filter = bool(use_vwap_slope_filter)
-        self.use_vwap_volume_imbalance_filter = bool(use_vwap_volume_imbalance_filter)
+        self.use_volume_imbalance_filter = bool(use_volume_imbalance_filter)
 
         # --- Volume imbalance thresholds ---
         # Imbalance mode: resolve canonical min_* from new or old param name.
         _imb_vol_short = (
-            float(min_vwap_volume_imbalance_pct_for_short)
-            if min_vwap_volume_imbalance_pct_for_short is not None
+            float(min_volume_imbalance_pct_for_short)
+            if min_volume_imbalance_pct_for_short is not None
             else (
-                float(max_vwap_volume_imbalance_pct_for_short)
-                if max_vwap_volume_imbalance_pct_for_short is not None
-                else float(max_vwap_volume_imbalance_pct)
+                float(max_volume_imbalance_pct_for_short)
+                if max_volume_imbalance_pct_for_short is not None
+                else float(max_volume_imbalance_pct)
             )
         )
-        self.min_vwap_volume_imbalance_pct_for_short = _imb_vol_short
-        # keep legacy attribute names for compatibility with existing callers
-        self.max_vwap_volume_imbalance_pct_for_short = _imb_vol_short
-        self.max_vwap_volume_imbalance_pct = _imb_vol_short
-        self.min_vwap_volume_imbalance_pct_for_long = (
-            float(min_vwap_volume_imbalance_pct_for_long)
-            if min_vwap_volume_imbalance_pct_for_long is not None
+        self.min_volume_imbalance_pct_for_short = _imb_vol_short
+        self.max_volume_imbalance_pct_for_short = _imb_vol_short
+        self.max_volume_imbalance_pct = _imb_vol_short
+        self.min_volume_imbalance_pct_for_long = (
+            float(min_volume_imbalance_pct_for_long)
+            if min_volume_imbalance_pct_for_long is not None
             else _imb_vol_short
         )
         # Rotational mode volume imbalance ceilings
-        self.max_vwap_volume_imbalance_pct_for_short_rot = (
-            float(max_vwap_volume_imbalance_pct_for_short_rot)
-            if max_vwap_volume_imbalance_pct_for_short_rot is not None
+        self.max_volume_imbalance_pct_for_short_rot = (
+            float(max_volume_imbalance_pct_for_short_rot)
+            if max_volume_imbalance_pct_for_short_rot is not None
             else None
         )
-        self.max_vwap_volume_imbalance_pct_for_long_rot = (
-            float(max_vwap_volume_imbalance_pct_for_long_rot)
-            if max_vwap_volume_imbalance_pct_for_long_rot is not None
+        self.max_volume_imbalance_pct_for_long_rot = (
+            float(max_volume_imbalance_pct_for_long_rot)
+            if max_volume_imbalance_pct_for_long_rot is not None
             else None
         )
 
@@ -364,10 +360,6 @@ class WeatherMarketImbalanceStrategy(Strategy):
         self.vwap_slope_value_per_point = float(vwap_slope_value_per_point)
         self.vwap_slope_scale = float(vwap_slope_scale)
         self.vwap_slope_lookback = int(vwap_slope_lookback)
-        if vwap_volume_imbalance_lookback is None:
-            self.vwap_volume_imbalance_lookback = int(vwap_slope_lookback)
-        else:
-            self.vwap_volume_imbalance_lookback = int(vwap_volume_imbalance_lookback)
         # --- VWAP slope thresholds ---
         # Imbalance mode: resolve canonical min_* from new or old param name.
         _imb_slope_short = (
@@ -436,13 +428,13 @@ class WeatherMarketImbalanceStrategy(Strategy):
             or self.track_delta_history
         )
         needs_sd_bands = bool(self.use_market_regime or self.use_stop_loss or self.use_trailing_stop)
-        if self.use_vwap_volume_imbalance_filter:
+        if self.use_volume_imbalance_filter:
             needs_sd_bands = True
         if self.market_regime_mode == "rotational":
             needs_sd_bands = True
         needs_vwap = bool(
             self.use_vwap_slope_filter
-            or self.use_vwap_volume_imbalance_filter
+            or self.use_volume_imbalance_filter
             or self.use_stop_loss
             or self.use_trailing_stop
         )
@@ -504,12 +496,11 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 ]
             )
 
-        if self.use_vwap_volume_imbalance_filter:
+        if self.use_volume_imbalance_filter:
             self.indicator_defs.append(
-                VwapVolumeImbalance(
+                VolumeImbalance(
                     volume=_volume,
                     sd_bands=_sd_bands,
-                    lookback=self.vwap_volume_imbalance_lookback,
                 )
             )
 
@@ -860,7 +851,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
         confidence = float(cast(float, position.get("confidence", 0.0)))
         vwap_slope = float(cast(float, position.get("vwap_slope", 0.0)))
         vwap_slope_raw = float(cast(float, position.get("vwap_slope_raw", 0.0)))
-        vwap_volume_imbalance_pct = float(cast(float, position.get("vwap_volume_imbalance_pct", float("nan"))))
+        volume_imbalance_pct = float(cast(float, position.get("volume_imbalance_pct", float("nan"))))
         buy_cvd = float(cast(float, position.get("buy_cvd", float("nan"))))
         sell_cvd = float(cast(float, position.get("sell_cvd", float("nan"))))
         price_band_position_entry = float(
@@ -950,7 +941,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 "confidence": confidence,
                 "vwap_slope": vwap_slope,
                 "vwap_slope_raw": vwap_slope_raw,
-                "vwap_volume_imbalance_pct": vwap_volume_imbalance_pct,
+                "volume_imbalance_pct": volume_imbalance_pct,
                 "buy_cvd": buy_cvd,
                 "sell_cvd": sell_cvd,
                 "price_band_position_entry": price_band_position_entry,
@@ -1106,7 +1097,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
 
         vwap_slope_values = inds.get("vwap_slope")
         vwap_slope_raw_values = inds.get("vwap_slope_raw")
-        vwap_imbalance_values = inds.get("vwap_volume_imbalance")
+        vwap_imbalance_values = inds.get("volume_imbalance")
 
         for asset in assets:
             buy_delta = _read_cum("cum_buy_delta", asset)
@@ -1225,30 +1216,26 @@ class WeatherMarketImbalanceStrategy(Strategy):
                             continue
 
             imbalance_pct = float("nan")
-            if self.use_vwap_volume_imbalance_filter:
+            if self.use_volume_imbalance_filter:
                 imbalance_pct = _indicator_asset_value(vwap_imbalance_values, asset)
                 if np.isnan(imbalance_pct):
                     continue
                 if self.market_regime_mode == "rotational":
-                    # Rotational: volume imbalance must confirm mean-reversion.
-                    # Shorts: skip if imbalance too negative (sell-side heavy,
-                    # trend continuation rather than reversion).
-                    # Longs: skip if imbalance too positive.
                     if entry_side == "short":
-                        rot_thr = self.max_vwap_volume_imbalance_pct_for_short_rot
+                        rot_thr = self.max_volume_imbalance_pct_for_short_rot
                         if rot_thr is not None and imbalance_pct < rot_thr:
                             continue
                     else:
-                        rot_thr = self.max_vwap_volume_imbalance_pct_for_long_rot
+                        rot_thr = self.max_volume_imbalance_pct_for_long_rot
                         if rot_thr is not None and imbalance_pct > rot_thr:
                             continue
                 else:
                     # Imbalance: min thresholds require sufficient extremity
                     if entry_side == "short":
-                        if imbalance_pct > self.min_vwap_volume_imbalance_pct_for_short:
+                        if imbalance_pct > self.min_volume_imbalance_pct_for_short:
                             continue
                     else:
-                        if imbalance_pct < self.min_vwap_volume_imbalance_pct_for_long:
+                        if imbalance_pct < self.min_volume_imbalance_pct_for_long:
                             continue
 
             if self.use_buy_cvd_3sd_gate:
@@ -1450,7 +1437,7 @@ class WeatherMarketImbalanceStrategy(Strategy):
                 "confidence": float(confidence),
                 "vwap_slope": float(slope),
                 "vwap_slope_raw": float(raw_slope),
-                "vwap_volume_imbalance_pct": float(imbalance_pct),
+                "volume_imbalance_pct": float(imbalance_pct),
                 "buy_cvd": float(buy_delta_entry),
                 "sell_cvd": float(sell_delta_entry),
                 "price_band_position_entry": self._price_band_position(

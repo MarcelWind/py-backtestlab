@@ -10,7 +10,7 @@ from matplotlib.lines import Line2D
 from stratlab.strategy.indicators import (
     SdBands,
     VwapSlope,
-    VwapVolumeImbalance,
+    VolumeImbalance,
     MeanReversion,
     sd_bands_expanding,
     analyze_band_position_vs_reference,
@@ -385,8 +385,8 @@ def _draw_vol_imbalance_row(
     ratio_pct = imbalance_df[market]
     entry_times, entry_vals = _entry_markers(market_trades, ratio_pct)
     lookback = (
-        max(3, int(ind_map["vwap_volume_imbalance"].lookback))
-        if "vwap_volume_imbalance" in ind_map else "?"
+        "session"
+        if "volume_imbalance" in ind_map else "?"
     )
     # Extract signal values at rebalance points (index from imbalance_df)
     signal_times = imbalance_df.index
@@ -609,7 +609,7 @@ def plot_entries_exits(
 
     Indicator panels are driven by ``indicator_defs`` (typically
     ``strategy.indicator_defs``). When not provided the function builds
-    ``VwapSlope``, ``VwapVolumeImbalance``, and ``MeanReversion`` instances
+    ``VwapSlope``, ``VolumeImbalance``, and ``MeanReversion`` instances
     from the legacy keyword parameters for backward compatibility.
     """
     suffix_re = re.compile(r"^(.*)__(yes|no)$", re.IGNORECASE)
@@ -697,9 +697,9 @@ def plot_entries_exits(
                 mode=vwap_slope_mode, value_per_point=vwap_slope_value_per_point,
                 scale=vwap_slope_scale, name="vwap_slope",
             ),
-            VwapVolumeImbalance(
-                volume=_vol, sd_bands=_sd_bands, lookback=vwap_slope_lookback,
-                name="vwap_volume_imbalance",
+            VolumeImbalance(
+                volume=_vol, sd_bands=_sd_bands,
+                name="volume_imbalance",
             ),
             MeanReversion(
                 window=mean_reversion_window,
@@ -728,13 +728,13 @@ def plot_entries_exits(
 
     if indicator_series is not None:
         slope_df     = indicator_series.get("vwap_slope")
-        imbalance_df = indicator_series.get("vwap_volume_imbalance")
+        imbalance_df = indicator_series.get("volume_imbalance")
         mr_df        = indicator_series.get("mean_reversion")
     else:
         slope_df = slope_ind.compute_series(prices, _returns) if slope_ind is not None else None
         imbalance_df = (
-            ind_map["vwap_volume_imbalance"].compute_series(prices, _returns)
-            if "vwap_volume_imbalance" in ind_map else None
+            ind_map["volume_imbalance"].compute_series(prices, _returns)
+            if "volume_imbalance" in ind_map else None
         )
         mr_df = (
             ind_map["mean_reversion"].compute_series(prices, _returns)

@@ -3,12 +3,12 @@
     {
       "name": "allow_longs",
       "type": "bool",
-      "values": [true, false]
+      "values": [true]
     },
     {
       "name": "allow_shorts",
       "type": "bool",
-      "values": [true, false]
+      "values": [true]
     },
     {
       "name": "use_market_regime",
@@ -18,7 +18,7 @@
     {
       "name": "market_regime_mode",
       "type": "choice",
-      "values": ["imbalance", "rotational"],
+      "values": ["rotational"],
       "enabled_if": {
         "use_market_regime": true
       }
@@ -36,9 +36,9 @@
     {
       "name": "mean_reversion_window",
       "type": "int",
-      "low": 3,
-      "high": 8,
-      "step": 1,
+      "low": 5,
+      "high": 5,
+      "step": 0,
       "enabled_if": {
         "use_market_regime": true
       }
@@ -46,9 +46,9 @@
     {
       "name": "mean_reversion_threshold",
       "type": "float",
-      "low": 0.45,
-      "high": 0.55,
-      "step": 0.05,
+      "low": 0.5,
+      "high": 0.5,
+      "step": 0,
       "enabled_if": {
         "use_market_regime": true
       }
@@ -100,9 +100,9 @@
     {
       "name": "balanced_within_1sd_threshold",
       "type": "float",
-      "low": 68.0,
+      "low": 70.0,
       "high": 70.0,
-      "step": 1.0,
+      "step": 0.0,
       "enabled_if": {
         "use_market_regime": true
       }
@@ -120,50 +120,66 @@
     {
       "name": "vwap_slope_lookback",
       "type": "int",
-      "low": 12,
-      "high": 60,
-      "step": 3,
+      "low": 30,
+      "high": 120,
+      "step": 30,
       "enabled_if": {
         "use_vwap_slope_filter": true
       }
     },
     {
-      "name": "max_vwap_slope_for_short",
+      "name": "max_vwap_slope_for_long_rot",
       "type": "float",
-      "low": -1.0,
-      "high": 0.0,
-      "step": 0.01,
+      "low": -5.0,
+      "high": -1.0,
+      "step": 0.5,
       "enabled_if": {
         "use_vwap_slope_filter": true,
-        "allow_shorts": true
+        "market_regime_mode": "rotational",
+        "allow_longs": true
       }
     },
     {
-      "name": "min_vwap_slope_for_short",
+      "name": "max_vwap_slope_for_short_rot",
       "type": "float",
-      "low": -1.0,
-      "high": 0.0,
-      "step": 0.01,
+      "low": 1.0,
+      "high": 5.0,
+      "step": 0.5,
       "enabled_if": {
         "use_vwap_slope_filter": true,
+        "market_regime_mode": "rotational",
         "allow_shorts": true
       }
     },
     {
       "name": "min_vwap_slope_for_long",
       "type": "float",
-      "low": 0.18,
-      "high": 1.0,
-      "step": 0.01,
+      "low": 1.0,
+      "high": 5.0,
+      "step": 0.5,
       "enabled_if": {
         "use_vwap_slope_filter": true,
+        "market_regime_mode": "imbalance",
         "allow_longs": true
       }
     },
     {
+      "name": "min_vwap_slope_for_short",
+      "type": "float",
+      "low": -5.0,
+      "high": -1.0,
+      "step": 0.5,
+      "enabled_if": {
+        "use_vwap_slope_filter": true,
+        "market_regime_mode": "imbalance",
+        "allow_shorts": true
+      }
+    },
+
+    {
       "name": "vwap_slope_value_per_point",
       "type": "log_float",
-      "low": 1e-6,
+      "low": 0.001,
       "high": 0.001,
       "step": 0.0,
       "enabled_if": {
@@ -181,73 +197,54 @@
       }
     },
     {
-      "name": "use_vwap_volume_imbalance_filter",
+      "name": "use_volume_imbalance_filter",
       "type": "bool",
       "values": [true, false]
     },
     {
-      "name": "vwap_volume_imbalance_lookback",
-      "type": "int",
-      "low": 20,
-      "high": 60,
-      "step": 10,
-      "enabled_if": {
-        "use_vwap_volume_imbalance_filter": true
-      }
-    },
-    {
-      "name": "min_vwap_volume_imbalance_pct_for_short",
+      "name": "min_volume_imbalance_pct_for_short",
       "type": "float",
-      "low": -1.0,
-      "high": -1.0,
-      "step": 0.0,
+      "low": -50.0,
+      "high": 25.0,
+      "step": 25.0,
       "enabled_if": {
-        "use_vwap_volume_imbalance_filter": true,
+        "use_volume_imbalance_filter": true,
+        "market_regime_mode": "imbalance",
         "allow_shorts": true
       }
     },
     {
-      "name": "max_vwap_volume_imbalance_pct_for_short",
+      "name": "min_volume_imbalance_pct_for_long",
       "type": "float",
-      "low": -1.0,
-      "high": 1.0,
-      "step": 0.1,
+      "low": -25.0,
+      "high": 50.0,
+      "step": 25.0,
       "enabled_if": {
-        "use_vwap_volume_imbalance_filter": true,
-        "allow_shorts": true
-      }
-    },
-    {
-      "name": "min_vwap_volume_imbalance_pct_for_long",
-      "type": "float",
-      "low": -1.0,
-      "high": 1.0,
-      "step": 0.1,
-      "enabled_if": {
-        "use_vwap_volume_imbalance_filter": true,
+        "use_volume_imbalance_filter": true,
+        "market_regime_mode": "imbalance",
         "allow_longs": true
       }
     },
     {
-      "name": "max_vwap_volume_imbalance_pct_for_short_rot",
+      "name": "max_volume_imbalance_pct_for_short_rot",
       "type": "float",
-      "low": -1.0,
-      "high": 1.0,
-      "step": 0.1,
+      "low": -100.0,
+      "high": 100.0,
+      "step": 50.0,
       "enabled_if": {
-        "use_vwap_volume_imbalance_filter": true,
+        "use_volume_imbalance_filter": true,
         "market_regime_mode": "rotational",
         "allow_shorts": true
       }
     },
     {
-      "name": "max_vwap_volume_imbalance_pct_for_long_rot",
+      "name": "max_volume_imbalance_pct_for_long_rot",
       "type": "float",
-      "low": -1.0,
-      "high": 1.0,
-      "step": 0.1,
+      "low": -100.0,
+      "high": 100.0,
+      "step": 50.0,
       "enabled_if": {
-        "use_vwap_volume_imbalance_filter": true,
+        "use_volume_imbalance_filter": true,
         "market_regime_mode": "rotational",
         "allow_longs": true
       }
@@ -306,8 +303,8 @@
     {
       "name": "max_sell_cvd_for_long",
       "type": "float",
-      "low": 0.0,
-      "high": 5000.0,
+      "low": -5000.0,
+      "high": 0.0,
       "step": 1000.0,
       "enabled_if": {
         "use_sell_cvd_filter": true,
@@ -369,30 +366,6 @@
       }
     },
     {
-      "name": "max_vwap_slope_for_short_rot",
-      "type": "float",
-      "low": -1.0,
-      "high": 0.0,
-      "step": 0.01,
-      "enabled_if": {
-        "use_vwap_slope_filter": true,
-        "market_regime_mode": "rotational",
-        "allow_shorts": true
-      }
-    },
-    {
-      "name": "max_vwap_slope_for_long_rot",
-      "type": "float",
-      "low": 0.0,
-      "high": 1.0,
-      "step": 0.01,
-      "enabled_if": {
-        "use_vwap_slope_filter": true,
-        "market_regime_mode": "rotational",
-        "allow_longs": true
-      }
-    },
-    {
       "name": "rotational_price_source",
       "type": "choice",
       "values": ["highlow"],
@@ -403,9 +376,9 @@
     {
       "name": "rotational_entry_band",
       "type": "int",
-      "low": 1,
-      "high": 6,
-      "step": 1,
+      "low": 3,
+      "high": 3,
+      "step": 0,
       "enabled_if": {
         "market_regime_mode": "rotational"
       }
@@ -423,9 +396,9 @@
     {
       "name": "rotational_window_hours",
       "type": "float",
-      "low": 1.0,
-      "high": 24.0,
-      "step": 1.0,
+      "low": 12.0,
+      "high": 36.0,
+      "step": 6.0,
       "enabled_if": {
         "market_regime_mode": "rotational"
       }

@@ -71,7 +71,7 @@ class Strategy(ABC):
 
         Returns a dict mapping indicator name to a DataFrame of shape
         (n_rebalance_bars, n_assets).  Only indicators whose ``compute()``
-        returns a ``pd.Series`` are included (e.g. VwapSlope, VwapVolumeImbalance,
+        returns a ``pd.Series`` are included (e.g. VwapSlope, VolumeImbalance,
         MeanReversion). DataFrame-returning indicators (e.g. BandPosition) are
         excluded.
         """

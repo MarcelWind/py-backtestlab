@@ -81,7 +81,7 @@ def apply_entry_filters(
     regime: np.ndarray,
     *,
     vwap_slope: np.ndarray | None = None,
-    vwap_volume_imbalance: np.ndarray | None = None,
+    volume_imbalance: np.ndarray | None = None,
     cum_buy_delta: np.ndarray | None = None,
     cum_sell_delta: np.ndarray | None = None,
     cum_buy_delta_mean: np.ndarray | None = None,
@@ -90,9 +90,9 @@ def apply_entry_filters(
     use_vwap_slope_filter: bool = False,
     max_vwap_slope_for_short: float = float("inf"),
     min_vwap_slope_for_long: float = float("-inf"),
-    use_vwap_volume_imbalance_filter: bool = False,
-    max_vwap_volume_imbalance_pct_for_short: float = float("inf"),
-    min_vwap_volume_imbalance_pct_for_long: float = float("-inf"),
+    use_volume_imbalance_filter: bool = False,
+    max_volume_imbalance_pct_for_short: float = float("inf"),
+    min_volume_imbalance_pct_for_long: float = float("-inf"),
     use_buy_cvd_3sd_gate: bool = False,
     use_buy_cvd_filter: bool = False,
     max_buy_cvd_for_short: float = float("inf"),
@@ -135,11 +135,11 @@ def apply_entry_filters(
         slope_ok = np.where(is_short, slope_ok_short, np.where(is_long, slope_ok_long, True))
         ok &= slope_ok
 
-    # VWAP volume imbalance filter
-    if use_vwap_volume_imbalance_filter and vwap_volume_imbalance is not None:
-        vim = vwap_volume_imbalance
-        vim_ok_short = np.isfinite(vim) & (vim <= max_vwap_volume_imbalance_pct_for_short)
-        vim_ok_long = np.isfinite(vim) & (vim >= min_vwap_volume_imbalance_pct_for_long)
+    # Volume imbalance filter
+    if use_volume_imbalance_filter and volume_imbalance is not None:
+        vim = volume_imbalance
+        vim_ok_short = np.isfinite(vim) & (vim <= max_volume_imbalance_pct_for_short)
+        vim_ok_long = np.isfinite(vim) & (vim >= min_volume_imbalance_pct_for_long)
         vim_ok = np.where(is_short, vim_ok_short, np.where(is_long, vim_ok_long, True))
         ok &= vim_ok
 
@@ -358,7 +358,7 @@ def batch_strategy_returns(
     entry_mask = apply_entry_filters(
         regime,
         vwap_slope=indicators.get("vwap_slope"),
-        vwap_volume_imbalance=indicators.get("vwap_volume_imbalance"),
+        volume_imbalance=indicators.get("volume_imbalance"),
         cum_buy_delta=indicators.get("cum_buy_delta"),
         cum_sell_delta=indicators.get("cum_sell_delta"),
         cum_buy_delta_mean=indicators.get("cum_buy_delta_mean"),
@@ -366,9 +366,9 @@ def batch_strategy_returns(
         use_vwap_slope_filter=params.get("use_vwap_slope_filter", False),
         max_vwap_slope_for_short=params.get("max_vwap_slope_for_short", float("inf")),
         min_vwap_slope_for_long=params.get("min_vwap_slope_for_long", float("-inf")),
-        use_vwap_volume_imbalance_filter=params.get("use_vwap_volume_imbalance_filter", False),
-        max_vwap_volume_imbalance_pct_for_short=params.get("max_vwap_volume_imbalance_pct_for_short", float("inf")),
-        min_vwap_volume_imbalance_pct_for_long=params.get("min_vwap_volume_imbalance_pct_for_long", float("-inf")),
+        use_volume_imbalance_filter=params.get("use_volume_imbalance_filter", False),
+        max_volume_imbalance_pct_for_short=params.get("max_volume_imbalance_pct_for_short", float("inf")),
+        min_volume_imbalance_pct_for_long=params.get("min_volume_imbalance_pct_for_long", float("-inf")),
         use_buy_cvd_3sd_gate=params.get("use_buy_cvd_3sd_gate", False),
         use_buy_cvd_filter=params.get("use_buy_cvd_filter", False),
         max_buy_cvd_for_short=params.get("max_buy_cvd_for_short", float("inf")),

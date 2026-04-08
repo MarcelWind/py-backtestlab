@@ -110,10 +110,6 @@ def _build_indicator_params(params: dict) -> dict:
         "vwap_slope_mode": params.get("vwap_slope_mode", "scaled"),
         "vwap_slope_value_per_point": params.get("vwap_slope_value_per_point", 1e-4),
         "vwap_slope_scale": params.get("vwap_slope_scale", 1.0),
-        "vwap_volume_imbalance_lookback": params.get(
-            "vwap_volume_imbalance_lookback",
-            params.get("vwap_slope_lookback", 30),
-        ),
     }
 
 

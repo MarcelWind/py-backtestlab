@@ -375,23 +375,21 @@ def vwap_slope(
 
 
 # ---------------------------------------------------------------------------
-# VwapVolumeImbalance
+# VolumeImbalance
 # ---------------------------------------------------------------------------
 
-def vwap_volume_imbalance(
+def volume_imbalance(
     prices: np.ndarray,
     volume: np.ndarray,
     band_mean: np.ndarray,
-    lookback: int,
 ) -> np.ndarray:
-    """Rolling (above-mean volume − below-mean volume) / total × 100.
+    """Session-cumulative (above-mean volume − below-mean volume) / total × 100.
 
     Parameters
     ----------
     prices : (n_perms, n_bars, n_assets)
     volume : (n_perms, n_bars, n_assets)
     band_mean : (n_perms, n_bars, n_assets) — expanding mean from sd_bands
-    lookback : int
 
     Returns
     -------
@@ -401,17 +399,11 @@ def vwap_volume_imbalance(
     above = np.where(valid & (prices > band_mean), volume, 0.0)
     below = np.where(valid & (prices <= band_mean), volume, 0.0)
 
-    def _rolling_sum(arr: np.ndarray) -> np.ndarray:
-        cs = np.cumsum(arr, axis=1)
-        out = cs.copy()
-        out[:, lookback:, :] = cs[:, lookback:, :] - cs[:, :-lookback, :]
-        return out
-
-    win_above = _rolling_sum(above)
-    win_below = _rolling_sum(below)
-    total = win_above + win_below
+    cum_above = np.cumsum(above, axis=1)
+    cum_below = np.cumsum(below, axis=1)
+    total = cum_above + cum_below
     safe_total = np.maximum(total, 1.0)
-    return (win_above - win_below) / safe_total * 100.0
+    return (cum_above - cum_below) / safe_total * 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -435,7 +427,6 @@ def compute_all_indicators(
     vwap_slope_mode: str = "scaled",
     vwap_slope_value_per_point: float = 1e-4,
     vwap_slope_scale: float = 1.0,
-    vwap_volume_imbalance_lookback: int = 30,
 ) -> dict[str, np.ndarray]:
     """Compute the full indicator stack for all permutations in one pass.
 
@@ -480,9 +471,9 @@ def compute_all_indicators(
             mode="raw",
         )
 
-        # VwapVolumeImbalance
-        result["vwap_volume_imbalance"] = vwap_volume_imbalance(
-            tp, volume, band_mean, vwap_volume_imbalance_lookback,
+        # VolumeImbalance
+        result["volume_imbalance"] = volume_imbalance(
+            tp, volume, band_mean,
         )
     else:
         result["vwap"] = close.copy()
