@@ -9,6 +9,7 @@ and the MCPT ``{slug: {submarket: DataFrame}}`` event layout.
 from __future__ import annotations
 
 import gc
+import logging
 import re
 import sys
 from pathlib import Path
@@ -28,6 +29,8 @@ from stratlab.validation.mcpt import aggregate_market_returns, concat_returns_in
 from strategies.weather_market_strategy import WeatherMarketImbalanceStrategy
 
 _VALID_OPTIMIZERS = ("random", "bayesian")
+
+logger = logging.getLogger(__name__)
 
 
 # Re-use the suffix regex from indicators for column matching.
@@ -190,8 +193,6 @@ class WeatherMarketMCPTAdapter:
         n_trials: int,
         rebalance_freq: int = 1,
         scoring_fn: "Any | None" = None,
-        verbose: bool = False,
-        log_fn: "Any | None" = None,
         optimizer: str = "random",
         cache_snapshots: bool = False,
     ) -> None:
@@ -204,8 +205,6 @@ class WeatherMarketMCPTAdapter:
         self.n_trials = n_trials
         self.rebalance_freq = rebalance_freq
         self.scoring_fn = scoring_fn
-        self.verbose = verbose
-        self.log_fn = log_fn or print
         self.optimizer = optimizer
         self.cache_snapshots = cache_snapshots
 
@@ -224,11 +223,10 @@ class WeatherMarketMCPTAdapter:
         if self.optimizer == "bayesian":
             return self._optimize_bayesian(events, event_order)
 
-        if self.verbose:
-            self.log_fn(
-                f"[optimize] Starting random search: {self.n_trials} trials, "
-                f"objective={self.objective}"
-            )
+        logger.info(
+            "[optimize] Starting random search: %d trials, objective=%s",
+            self.n_trials, self.objective,
+        )
 
         seen: set[tuple[tuple[str, Any], ...]] = set()
         best_score = float("-inf")
@@ -255,8 +253,7 @@ class WeatherMarketMCPTAdapter:
                     chosen = sampled
                     break
             if chosen is None:
-                if self.verbose:
-                    self.log_fn(f"[optimize] Exhausted unique samples at trial {trial_idx}")
+                logger.warning("[optimize] Exhausted unique samples at trial %d", trial_idx)
                 break
 
             # Evaluate on all IS events
@@ -281,11 +278,10 @@ class WeatherMarketMCPTAdapter:
                     event_scores.append(score)
 
             if not event_scores:
-                if self.verbose:
-                    self.log_fn(
-                        f"[optimize] trial {trial_idx + 1}/{self.n_trials}: "
-                        f"no valid scores ({len(event_order)} events)"
-                    )
+                logger.debug(
+                    "[optimize] trial %d/%d: no valid scores (%d events)",
+                    trial_idx + 1, self.n_trials, len(event_order),
+                )
                 continue
             agg_score = float(np.mean(event_scores))
 
@@ -294,19 +290,18 @@ class WeatherMarketMCPTAdapter:
                 best_score = agg_score
                 best_params = dict(chosen)
 
-            if self.verbose:
-                marker = " ** new best" if is_new_best else ""
-                self.log_fn(
-                    f"[optimize] trial {trial_idx + 1}/{self.n_trials}: "
-                    f"{self.objective}={agg_score / objective_sign:.6f} "
-                    f"({len(event_scores)} events){marker}"
-                )
+            marker = " ** new best" if is_new_best else ""
+            logger.debug(
+                "[optimize] trial %d/%d: %s=%.6f (%d events)%s",
+                trial_idx + 1, self.n_trials,
+                self.objective, agg_score / objective_sign,
+                len(event_scores), marker,
+            )
 
             if (trial_idx + 1) % 10 == 0:
                 gc.collect()
 
-        if self.verbose:
-            self.log_fn(f"[optimize] Done. Best {self.objective}={best_score / objective_sign:.6f}")
+        logger.info("[optimize] Done. Best %s=%.6f", self.objective, best_score / objective_sign)
 
         return best_params
 
@@ -320,11 +315,11 @@ class WeatherMarketMCPTAdapter:
 
         from stratlab.optimize.bayesian_search import create_study, rules_to_optuna_params
 
-        if self.verbose:
-            self.log_fn(
-                f"[optimize] Starting Bayesian (TPE) search: {self.n_trials} trials, "
-                f"objective={self.objective}"
-            )
+        logger.info(
+            "[optimize] Starting Bayesian (TPE) search: %d trials, objective=%s",
+            self.n_trials, self.objective,
+        )
+        if logger.isEnabledFor(logging.DEBUG):
             optuna.logging.set_verbosity(optuna.logging.INFO)
         else:
             optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -366,12 +361,12 @@ class WeatherMarketMCPTAdapter:
 
             agg_score = float(np.mean(event_scores))
 
-            if self.verbose:
-                self.log_fn(
-                    f"[optimize] trial {trial.number + 1}/{self.n_trials}: "
-                    f"{self.objective}={agg_score / objective_sign:.6f} "
-                    f"({len(event_scores)} events)"
-                )
+            logger.debug(
+                "[optimize] trial %d/%d: %s=%.6f (%d events)",
+                trial.number + 1, self.n_trials,
+                self.objective, agg_score / objective_sign,
+                len(event_scores),
+            )
 
             if (trial.number + 1) % 10 == 0:
                 gc.collect()
@@ -391,11 +386,10 @@ class WeatherMarketMCPTAdapter:
         best_params = rules_to_optuna_params(best_trial, self.rules, self.base_params)
         best_value = study.best_value
 
-        if self.verbose:
-            self.log_fn(
-                f"[optimize] Done. Best {self.objective}="
-                f"{best_value / objective_sign:.6f} (trial {best_trial.number + 1})"
-            )
+        logger.info(
+            "[optimize] Done. Best %s=%.6f (trial %d)",
+            self.objective, best_value / objective_sign, best_trial.number + 1,
+        )
 
         # Free intermediate state before proceeding to MCPT.
         del study, event_snapshots

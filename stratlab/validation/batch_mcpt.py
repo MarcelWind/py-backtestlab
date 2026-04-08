@@ -15,6 +15,7 @@ vectorized engine does not yet support (e.g., TP/SL exits, trailing stop).
 from __future__ import annotations
 
 import gc
+import logging
 import platform
 import time
 from typing import Any, Callable
@@ -47,6 +48,8 @@ from .mcpt import (
 )
 from ..strategy.vectorized_indicators import compute_all_indicators
 from ..strategy.vectorized_weights import batch_strategy_returns
+
+logger = logging.getLogger(__name__)
 
 
 def _reconstruct_matrices(event_data: dict[str, pd.DataFrame]):
@@ -121,8 +124,6 @@ def run_batch_mcpt(
     n_permutations: int = 1000,
     *,
     scoring_fn: Callable[[pd.Series], float] = profit_factor,
-    verbose: bool = False,
-    log_fn: Callable[[str], None] | None = None,
     label: str = "batch",
 ) -> MCPTResult:
     """Run MCPT using the batch-vectorized pipeline.
@@ -140,8 +141,6 @@ def run_batch_mcpt(
         Optimised strategy parameters.
     n_permutations : int
     scoring_fn : callable
-    verbose : bool
-    log_fn : callable
     label : str
         Tag for log messages (``"insample"`` or ``"outsample"``).
 
@@ -149,9 +148,6 @@ def run_batch_mcpt(
     -------
     MCPTResult
     """
-    if log_fn is None:
-        log_fn = print
-
     # --- Real returns (via existing adapter) --------------------------------
     real_event_rets, real_event_pf, real_mkt_rets, real_mkt_pf = _apply_event_strategy_to_events(
         strategy, events, event_order, params, scoring_fn,
@@ -160,8 +156,7 @@ def run_batch_mcpt(
     real_pf = scoring_fn(real_cohort_rets)
 
     total_perms = n_permutations - 1
-    if verbose:
-        log_fn(f"[{label}] real score={real_pf:.6f}, starting {total_perms} batch permutations")
+    logger.info("[%s] real score=%.6f, starting %d batch permutations", label, real_pf, total_perms)
 
     # --- Pre-compute total bar count for compact accumulator ----------------
     event_bar_counts: dict[str, int] = {}
@@ -259,13 +254,12 @@ def run_batch_mcpt(
         del port_rets_2d
         bar_offset += n_bars
 
-        if verbose:
-            elapsed = time.monotonic() - t0
-            rss = _rss_mb()
-            log_fn(
-                f"[{label}] event {slug}: batch done "
-                f"({elapsed:.1f}s elapsed, RSS={rss:.0f}MB)"
-            )
+        elapsed = time.monotonic() - t0
+        rss = _rss_mb()
+        logger.debug(
+            "[%s] event %s: batch done (%.1fs elapsed, RSS=%.0fMB)",
+            label, slug, elapsed, rss,
+        )
 
         gc.collect()
 
@@ -283,9 +277,9 @@ def run_batch_mcpt(
         if pf >= real_pf:
             perm_better_count += 1
 
-        if verbose and (pi + 1 == 1 or (pi + 1) % 10 == 0 or pi + 1 == total_perms):
+        if pi + 1 == 1 or (pi + 1) % 10 == 0 or pi + 1 == total_perms:
             running_p = perm_better_count / (pi + 2)  # +2: 1-indexed + real
-            log_fn(f"[{label}] scored {pi + 1}/{total_perms}: p={running_p:.4f}")
+            logger.debug("[%s] scored %d/%d: p=%.4f", label, pi + 1, total_perms, running_p)
 
     # Free the large accumulator now that scoring is done
     del perm_cohort_rets
@@ -310,9 +304,8 @@ def run_batch_mcpt(
                 permuted_returns=[],  # omitted in batch mode to save memory
             )
 
-    if verbose:
-        elapsed = time.monotonic() - t0
-        log_fn(f"[{label}] batch MCPT done: score={real_pf:.6f}, p={p_value:.6f} ({elapsed:.1f}s)")
+    elapsed = time.monotonic() - t0
+    logger.info("[%s] batch MCPT done: score=%.6f, p=%.6f (%.1fs)", label, real_pf, p_value, elapsed)
 
     return MCPTResult(
         real_pf=real_pf,

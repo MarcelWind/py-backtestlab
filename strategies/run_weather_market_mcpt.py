@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -59,11 +60,7 @@ from strategies.weather_market_strategy import WeatherMarketImbalanceStrategy
 
 _PARAM_CONFIG_PATH = Path(__file__).with_name("weather_market_monte_carlo_params.json")
 
-
-def _vprint(verbose: bool, message: str) -> None:
-    """Print progress messages only when verbose mode is enabled."""
-    if verbose:
-        print(message, flush=True)
+logger = logging.getLogger(__name__)
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -250,6 +247,18 @@ def main() -> None:
             "Omit this flag to save memory."
         ),
     )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging verbosity level. --verbose forces DEBUG regardless of this setting.",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=None,
+        help="Path to write log output to a file. Defaults to run.log in the run output directory.",
+    )
     args = parser.parse_args()
 
     if args.n_trials <= 0:
@@ -265,18 +274,20 @@ def main() -> None:
     if args.workers < 1:
         raise ValueError("--workers must be >= 1")
 
-    verbose = bool(args.verbose)
-    _vprint(
-        verbose,
-        (
-            "Starting weather MCPT run "
-            f"(profile={args.profile}, objective={args.objective}, "
-            f"optimizer={args.optimizer}, "
-            f"n_trials={args.n_trials}, "
-            f"insample_perms={args.n_permutations_insample}, "
-            f"outsample_perms={args.n_permutations_outsample}, "
-            f"workers={args.workers})"
-        ),
+    # --- Logging setup ------------------------------------------------------
+    level = logging.DEBUG if args.verbose else getattr(logging, args.log_level)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    )
+
+    logger.info(
+        "Starting weather MCPT run (profile=%s, objective=%s, optimizer=%s, "
+        "n_trials=%d, insample_perms=%d, outsample_perms=%d, workers=%d)",
+        args.profile, args.objective, args.optimizer,
+        args.n_trials, args.n_permutations_insample, args.n_permutations_outsample,
+        args.workers,
     )
     run_start = time.perf_counter()
 
@@ -291,7 +302,7 @@ def main() -> None:
         if not events_file_path.is_absolute():
             events_file_path = PROJECT_ROOT / events_file_path
         event_slugs_file = load_event_slugs_from_file(events_file_path)
-        _vprint(verbose, f"Loaded {len(event_slugs_file)} event slugs from '{events_file_path}'")
+        logger.info("Loaded %d event slugs from '%s'", len(event_slugs_file), events_file_path)
 
     event_slugs = list(dict.fromkeys(event_slugs_file + event_slugs_cli))
     if not event_slugs:
@@ -304,13 +315,10 @@ def main() -> None:
             resample_rule=resample_rule,
             prefer_outcome=args.prefer_outcome,
         )
-        _vprint(
-            verbose,
-            (
-                f"[{idx}/{len(event_slugs)}] Loaded '{slug}' "
-                f"with {len(event_data[slug]['prices'])} bars "
-                f"(resample={resample_rule or 'native'})"
-            ),
+        logger.debug(
+            "[%d/%d] Loaded '%s' with %d bars (resample=%s)",
+            idx, len(event_slugs), slug, len(event_data[slug]["prices"]),
+            resample_rule or "native",
         )
         # Periodically release PyArrow / parquet intermediate buffers.
         if idx % 50 == 0:
@@ -326,12 +334,9 @@ def main() -> None:
     in_sample_event_slugs = partition.in_sample_event_slugs
     out_of_sample_event_slugs = partition.out_of_sample_event_slugs
 
-    _vprint(
-        verbose,
-        (
-            f"Event partition: insample={len(in_sample_event_slugs)}, "
-            f"outsample={len(out_of_sample_event_slugs)}, seed={partition_seed}"
-        ),
+    logger.info(
+        "Event partition: insample=%d, outsample=%d, seed=%d",
+        len(in_sample_event_slugs), len(out_of_sample_event_slugs), partition_seed,
     )
 
     # --- Convert to MCPT format ---------------------------------------------
@@ -371,8 +376,6 @@ def main() -> None:
         n_trials=args.n_trials,
         rebalance_freq=args.rebalance_freq,
         scoring_fn=scoring_fn,
-        verbose=verbose,
-        log_fn=lambda msg: _vprint(verbose, msg),
         optimizer=args.optimizer,
         cache_snapshots=args.cache_snapshots,
     )
@@ -382,14 +385,23 @@ def main() -> None:
     event_group = event_slugs[0] if len(event_slugs) == 1 else f"{len(event_slugs)}_events"
     out_dir = RESULTS_DIR / "weather_imbalance_mc" / event_group / timestamp
     out_dir.mkdir(parents=True, exist_ok=True)
-    _vprint(verbose, f"Writing outputs to {out_dir}")
+    log_path = Path(args.log_file) if args.log_file else out_dir / "run.log"
+    _fh = logging.FileHandler(log_path)
+    _fh.setLevel(level)
+    _fh.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+    ))
+    logging.getLogger().addHandler(_fh)
+    logger.info("Writing outputs to %s", out_dir)
+    logger.info("Log file: %s", log_path)
 
     # --- Insample MCPT ------------------------------------------------------
-    _vprint(verbose, "Running insample MCPT")
+    logger.info("Running insample MCPT")
     if args.batch:
         # Optimization still runs via the adapter (captures real returns).
         # The permutation loop is replaced by the batch-vectorized engine.
-        _vprint(verbose, "[batch] optimizing parameters via adapter")
+        logger.debug("[batch] optimizing parameters via adapter")
         is_params = adapter.optimize(is_events, in_sample_event_slugs)
         is_result: MCPTResult = run_batch_mcpt(
             adapter,
@@ -398,8 +410,6 @@ def main() -> None:
             params=is_params,
             n_permutations=args.n_permutations_insample,
             scoring_fn=scoring_fn,
-            verbose=verbose,
-            log_fn=lambda msg: _vprint(verbose, msg),
             label="insample",
         )
         is_result.params = is_params
@@ -410,21 +420,16 @@ def main() -> None:
             in_sample_event_slugs,
             n_permutations=args.n_permutations_insample,
             scoring_fn=scoring_fn,
-            verbose=verbose,
-            log_fn=lambda msg: _vprint(verbose, msg),
             workers=args.workers,
         )
     gc.collect()
 
-    _vprint(
-        verbose,
-        f"Insample MCPT done: real_pf={is_result.real_pf:.6f}, p_value={is_result.p_value:.6f}",
-    )
+    logger.info("Insample MCPT done: real_pf=%.6f, p_value=%.6f", is_result.real_pf, is_result.p_value)
 
     # --- Outsample MCPT -----------------------------------------------------
     oos_result: MCPTResult | None = None
     if out_of_sample_event_slugs:
-        _vprint(verbose, "Running outsample MCPT")
+        logger.info("Running outsample MCPT")
         if args.batch:
             oos_result = run_batch_mcpt(
                 adapter,
@@ -433,8 +438,6 @@ def main() -> None:
                 params=is_result.params,
                 n_permutations=args.n_permutations_outsample,
                 scoring_fn=scoring_fn,
-                verbose=verbose,
-                log_fn=lambda msg: _vprint(verbose, msg),
                 label="outsample",
             )
         else:
@@ -445,18 +448,13 @@ def main() -> None:
                 params=is_result.params,
                 n_permutations=args.n_permutations_outsample,
                 scoring_fn=scoring_fn,
-                verbose=verbose,
-                log_fn=lambda msg: _vprint(verbose, msg),
                 workers=args.workers,
             )
         gc.collect()
 
-        _vprint(
-            verbose,
-            f"Outsample MCPT done: real_pf={oos_result.real_pf:.6f}, p_value={oos_result.p_value:.6f}",
-        )
+        logger.info("Outsample MCPT done: real_pf=%.6f, p_value=%.6f", oos_result.real_pf, oos_result.p_value)
     else:
-        _vprint(verbose, "No outsample events — skipping outsample MCPT")
+        logger.warning("No outsample events - skipping outsample MCPT")
 
     # --- Plots --------------------------------------------------------------
     is_cohort_rets = concat_returns_in_order(is_result.per_event_returns, in_sample_event_slugs)

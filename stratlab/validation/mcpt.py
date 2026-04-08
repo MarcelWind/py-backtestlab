@@ -21,12 +21,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol, runtime_checkable
 
+import logging
 import multiprocessing as mp
 
 import numpy as np
 import pandas as pd
 
 from .bar_permute import get_permutation, permute_event_bars
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -402,8 +405,6 @@ def run_insample_mcpt(
     n_permutations: int = 1000,
     *,
     scoring_fn: Callable[[pd.Series], float] = profit_factor,
-    verbose: bool = False,
-    log_fn: Callable[[str], None] | None = None,
     workers: int = 1,
 ) -> MCPTResult:
     """Run in-sample MCPT.
@@ -428,17 +429,10 @@ def run_insample_mcpt(
         Total permutation count (real + synthetic).
     scoring_fn:
         Metric applied to a return series.  Defaults to :func:`profit_factor`.
-    verbose:
-        Emit progress messages via *log_fn*.
-    log_fn:
-        Callback for verbose output.  Defaults to ``print``.
     workers:
         Number of parallel worker processes for the permutation loop.
         ``1`` (default) runs sequentially.
     """
-    if log_fn is None:
-        log_fn = print
-
     event_level = isinstance(strategy, EventLevelMCPTStrategy)
 
     params = strategy.optimize(events, event_order)
@@ -455,12 +449,12 @@ def run_insample_mcpt(
     real_cohort_rets = concat_returns_in_order(real_event_rets, event_order)
     real_pf = scoring_fn(real_cohort_rets)
 
-    if verbose:
-        log_fn(
-            f"[insample] real score={real_pf:.6f}, "
-            f"starting {n_permutations - 1} permutations"
-            + (f" ({workers} workers)" if workers > 1 else "")
-        )
+    logger.info(
+        "[insample] real score=%.6f, starting %d permutations%s",
+        real_pf,
+        n_permutations - 1,
+        f" ({workers} workers)" if workers > 1 else "",
+    )
 
     # --- Permutation loop ---------------------------------------------------
     perm_better_count = 1
@@ -498,9 +492,9 @@ def run_insample_mcpt(
                 ):
                     perm_better_count += 1
                 completed += 1
-                if verbose and (completed == 1 or completed % 10 == 0 or completed == total_perms):
+                if completed == 1 or completed % 10 == 0 or completed == total_perms:
                     running_p = perm_better_count / (completed + 1)
-                    log_fn(f"[insample] perm {completed}/{total_perms}: p={running_p:.4f}")
+                    logger.debug("[insample] perm %d/%d: p=%.4f", completed, total_perms, running_p)
     else:
         for perm_i in range(1, n_permutations):
             perm_event_rets: dict[str, pd.Series] = {}
@@ -535,9 +529,9 @@ def run_insample_mcpt(
                 permuted_pfs.append(float(perm_pf))
             if perm_pf >= real_pf:
                 perm_better_count += 1
-            if verbose and (perm_i == 1 or perm_i % 10 == 0 or perm_i == total_perms):
+            if perm_i == 1 or perm_i % 10 == 0 or perm_i == total_perms:
                 running_p = perm_better_count / (perm_i + 1)
-                log_fn(f"[insample] perm {perm_i}/{total_perms}: p={running_p:.4f}")
+                logger.debug("[insample] perm %d/%d: p=%.4f", perm_i, total_perms, running_p)
 
     p_value = float(perm_better_count / n_permutations)
 
@@ -558,8 +552,7 @@ def run_insample_mcpt(
                 permuted_returns=perm_mkt_rets[slug][col],
             )
 
-    if verbose:
-        log_fn(f"insample cohort score={real_pf:.6f}, p-value={p_value:.6f}")
+    logger.info("insample cohort score=%.6f, p-value=%.6f", real_pf, p_value)
 
     return MCPTResult(
         real_pf=real_pf,
@@ -580,8 +573,6 @@ def run_oos_mcpt(
     n_permutations: int = 1000,
     *,
     scoring_fn: Callable[[pd.Series], float] = profit_factor,
-    verbose: bool = False,
-    log_fn: Callable[[str], None] | None = None,
     workers: int = 1,
 ) -> MCPTResult:
     """Run out-of-sample MCPT with pre-trained parameters.
@@ -592,9 +583,6 @@ def run_oos_mcpt(
 
     Supports both :class:`MCPTStrategy` and :class:`EventLevelMCPTStrategy`.
     """
-    if log_fn is None:
-        log_fn = print
-
     event_level = isinstance(strategy, EventLevelMCPTStrategy)
 
     # --- Real returns -------------------------------------------------------
@@ -609,12 +597,12 @@ def run_oos_mcpt(
     real_cohort_rets = concat_returns_in_order(real_event_rets, event_order)
     real_pf = scoring_fn(real_cohort_rets)
 
-    if verbose:
-        log_fn(
-            f"[outsample] real score={real_pf:.6f}, "
-            f"starting {n_permutations - 1} permutations"
-            + (f" ({workers} workers)" if workers > 1 else "")
-        )
+    logger.info(
+        "[outsample] real score=%.6f, starting %d permutations%s",
+        real_pf,
+        n_permutations - 1,
+        f" ({workers} workers)" if workers > 1 else "",
+    )
 
     # --- Permutation loop ---------------------------------------------------
     perm_better_count = 1
@@ -650,9 +638,9 @@ def run_oos_mcpt(
                 ):
                     perm_better_count += 1
                 completed += 1
-                if verbose and (completed == 1 or completed % 10 == 0 or completed == total_perms):
+                if completed == 1 or completed % 10 == 0 or completed == total_perms:
                     running_p = perm_better_count / (completed + 1)
-                    log_fn(f"[outsample] perm {completed}/{total_perms}: p={running_p:.4f}")
+                    logger.debug("[outsample] perm %d/%d: p=%.4f", completed, total_perms, running_p)
     else:
         for perm_i in range(1, n_permutations):
             perm_event_rets: dict[str, pd.Series] = {}
@@ -687,9 +675,9 @@ def run_oos_mcpt(
                 permuted_pfs.append(float(perm_pf))
             if perm_pf >= real_pf:
                 perm_better_count += 1
-            if verbose and (perm_i == 1 or perm_i % 10 == 0 or perm_i == total_perms):
+            if perm_i == 1 or perm_i % 10 == 0 or perm_i == total_perms:
                 running_p = perm_better_count / (perm_i + 1)
-                log_fn(f"[outsample] perm {perm_i}/{total_perms}: p={running_p:.4f}")
+                logger.debug("[outsample] perm %d/%d: p=%.4f", perm_i, total_perms, running_p)
 
     p_value = float(perm_better_count / n_permutations)
 
@@ -710,8 +698,7 @@ def run_oos_mcpt(
                 permuted_returns=perm_mkt_rets[slug][col],
             )
 
-    if verbose:
-        log_fn(f"outsample cohort score={real_pf:.6f}, p-value={p_value:.6f}")
+    logger.info("outsample cohort score=%.6f, p-value=%.6f", real_pf, p_value)
 
     return MCPTResult(
         real_pf=real_pf,
