@@ -256,8 +256,9 @@ class WeatherMarketMCPTAdapter:
                 logger.warning("[optimize] Exhausted unique samples at trial %d", trial_idx)
                 break
 
-            # Evaluate on all IS events
-            event_scores: list[float] = []
+            # Evaluate on all IS events — collect returns, then score the
+            # concatenated cohort to match the MCPT engine's real_pf calc.
+            all_event_rets: dict[str, pd.Series] = {}
             capture = use_snapshots and trial_idx == 0
             for slug in event_order:
                 if capture:
@@ -271,19 +272,18 @@ class WeatherMarketMCPTAdapter:
                         events[slug], chosen,
                         indicator_snapshots=event_snapshots.get(slug) if use_snapshots else None,
                     )
-                if rets.empty:
-                    continue
-                score = self._score_returns(rets)
-                if np.isfinite(score):
-                    event_scores.append(score)
+                all_event_rets[slug] = rets
 
-            if not event_scores:
+            cohort_rets = concat_returns_in_order(all_event_rets, event_order)
+            if cohort_rets.empty:
                 logger.debug(
-                    "[optimize] trial %d/%d: no valid scores (%d events)",
+                    "[optimize] trial %d/%d: no valid returns (%d events)",
                     trial_idx + 1, self.n_trials, len(event_order),
                 )
                 continue
-            agg_score = float(np.mean(event_scores))
+            agg_score = self._score_returns(cohort_rets)
+            if not np.isfinite(agg_score):
+                continue
 
             is_new_best = agg_score > best_score
             if is_new_best:
@@ -295,7 +295,7 @@ class WeatherMarketMCPTAdapter:
                 "[optimize] trial %d/%d: %s=%.6f (%d events)%s",
                 trial_idx + 1, self.n_trials,
                 self.objective, agg_score / objective_sign,
-                len(event_scores), marker,
+                len(event_order), marker,
             )
 
             if (trial_idx + 1) % 10 == 0:
@@ -333,7 +333,7 @@ class WeatherMarketMCPTAdapter:
             nonlocal first_trial_done, event_snapshots
             chosen = rules_to_optuna_params(trial, self.rules, self.base_params)
 
-            event_scores: list[float] = []
+            all_event_rets: dict[str, pd.Series] = {}
             capture = use_snapshots and not first_trial_done
 
             for slug in event_order:
@@ -348,24 +348,23 @@ class WeatherMarketMCPTAdapter:
                         events[slug], chosen,
                         indicator_snapshots=event_snapshots.get(slug) if use_snapshots else None,
                     )
-                if rets.empty:
-                    continue
-                score = self._score_returns(rets)
-                if np.isfinite(score):
-                    event_scores.append(score)
+                all_event_rets[slug] = rets
 
             first_trial_done = True
 
-            if not event_scores:
+            cohort_rets = concat_returns_in_order(all_event_rets, event_order)
+            if cohort_rets.empty:
                 return float("-inf")
 
-            agg_score = float(np.mean(event_scores))
+            agg_score = self._score_returns(cohort_rets)
+            if not np.isfinite(agg_score):
+                return float("-inf")
 
             logger.debug(
                 "[optimize] trial %d/%d: %s=%.6f (%d events)",
                 trial.number + 1, self.n_trials,
                 self.objective, agg_score / objective_sign,
-                len(event_scores),
+                len(event_order),
             )
 
             if (trial.number + 1) % 10 == 0:

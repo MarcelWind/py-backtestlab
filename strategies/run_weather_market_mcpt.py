@@ -106,6 +106,43 @@ def _load_event_bundle(
     }
 
 
+def _save_optimize_result(
+    out_dir: Path,
+    params: Any,
+    objective: str,
+    scoring_fn: Any,
+    events: "dict",
+    event_order: "list[str]",
+    adapter: "Any",
+) -> None:
+    """Compute and persist the optimization result to ``out_dir/optimize_result.json``."""
+    from stratlab.validation.mcpt import concat_returns_in_order
+
+    all_rets: dict[str, Any] = {}
+    for slug in event_order:
+        rets_by_market = adapter.apply_event(events[slug], params)
+        # Aggregate across submarkets (single _portfolio_ key in this case)
+        from stratlab.validation.mcpt import aggregate_market_returns
+        all_rets[slug] = aggregate_market_returns(rets_by_market)
+
+    cohort_rets = concat_returns_in_order(all_rets, event_order)
+    score: float = float(scoring_fn(cohort_rets)) if not cohort_rets.empty else float("nan")
+
+    payload: dict[str, Any] = {
+        "objective": objective,
+        "best_score": score,
+        "best_params": params,
+        "n_events": len(event_order),
+        "event_slugs": event_order,
+    }
+    out_path = out_dir / "optimize_result.json"
+    out_path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    logger.info(
+        "Optimize result saved: %s=%.6f → %s",
+        objective, score, out_path,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="MCPT-based Monte Carlo runner for WeatherMarketImbalanceStrategy"
@@ -403,6 +440,7 @@ def main() -> None:
         # The permutation loop is replaced by the batch-vectorized engine.
         logger.debug("[batch] optimizing parameters via adapter")
         is_params = adapter.optimize(is_events, in_sample_event_slugs)
+        _save_optimize_result(out_dir, is_params, args.objective, scoring_fn, is_events, in_sample_event_slugs, adapter)
         is_result: MCPTResult = run_batch_mcpt(
             adapter,
             is_events,
@@ -422,6 +460,7 @@ def main() -> None:
             scoring_fn=scoring_fn,
             workers=args.workers,
         )
+        _save_optimize_result(out_dir, is_result.params, args.objective, scoring_fn, is_events, in_sample_event_slugs, adapter)
     gc.collect()
 
     logger.info("Insample MCPT done: real_pf=%.6f, p_value=%.6f", is_result.real_pf, is_result.p_value)
